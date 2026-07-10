@@ -394,7 +394,14 @@ Note that because the secret lives in the URL, it will appear in Vercel's reques
 
 ### Refreshing the cookie
 
-TrainingPeaks' login form is protected by reCAPTCHA, so the server can't log itself in - the `Production_tpAuth` cookie has to be minted from a real, already-logged-in browser and pushed up. `tp-mcp push-cookie` does the whole thing in one command: it extracts the cookie from your browser, validates it against TrainingPeaks, uploads it as the `TP_AUTH_COOKIE` env var, and redeploys.
+TrainingPeaks' login form is protected by reCAPTCHA, so the server can't log itself in - the `Production_tpAuth` cookie has to be minted from a real, already-logged-in browser (or pasted manually) and pushed up. `tp-mcp push-cookie` does the whole thing in one command: it validates the cookie against TrainingPeaks, uploads it as the `TP_AUTH_COOKIE` env var, and redeploys. It supports two sources - pick one:
+
+```bash
+tp-mcp push-cookie --from-browser chrome   # extracts from chrome/brave/firefox/safari/edge/auto, validates + uploads
+tp-mcp push-cookie --from-stored           # reuses the cookie already stored by `tp-mcp auth`, validates + uploads
+```
+
+**If browser extraction fails**: on macOS, reading a browser's cookie database requires Full Disk Access for your terminal (System Settings > Privacy & Security > Full Disk Access). If you can't or don't want to grant that, run `tp-mcp auth` once to paste the cookie manually, then use `tp-mcp push-cookie --from-stored` instead - no browser access needed.
 
 To make this hands-off, schedule it to run weekly:
 
@@ -403,7 +410,7 @@ tp-mcp schedule > ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
 launchctl load ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
 ```
 
-From then on the cookie refreshes itself weekly, as long as your machine is on and you're still logged into TrainingPeaks in that browser. You can also just run `tp-mcp push-cookie` manually any time.
+The scheduled job uses browser extraction (`--from-browser`), so the process running it (the `tp-mcp` binary's parent, e.g. `launchd`) needs Full Disk Access granted, or the weekly run will fail. If you haven't granted that (or don't want to), skip the schedule and refresh manually instead whenever the cookie expires: `tp-mcp auth` once, then `tp-mcp push-cookie --from-stored`.
 
 ### Local HTTP mode
 

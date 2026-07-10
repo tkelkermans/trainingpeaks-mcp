@@ -162,3 +162,88 @@ class TestPushCookieGuards:
             exit_code = cmd_push_cookie(from_browser="chrome", target="production")
 
         assert exit_code == 1
+
+    def test_aborts_on_browser_extraction_failure_with_actionable_hint(self, capsys):
+        """Browser-path failures must still return 1 without touching subprocess, and must
+        print a hint pointing the user at Full Disk Access and the --from-stored fallback.
+        """
+        from tp_mcp.auth.browser import BrowserCookieResult
+        from tp_mcp.cli import cmd_push_cookie
+
+        with (
+            patch("tp_mcp.cli.extract_tp_cookie") as mock_extract,
+            patch("subprocess.run", side_effect=AssertionError("subprocess.run must not be called")),
+        ):
+            mock_extract.return_value = BrowserCookieResult(success=False, message="Unable to read database file")
+
+            exit_code = cmd_push_cookie(from_browser="chrome", target="production")
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Full Disk Access" in captured.out
+        assert "--from-stored" in captured.out
+
+    def test_from_stored_success_skips_store_credential_and_passes_cookie_to_vercel(self):
+        """The from_stored path must read the already-stored cookie, validate it, never
+        call store_credential again, and pipe the cookie to `vercel env add` via stdin.
+        """
+        from unittest.mock import MagicMock
+
+        from tp_mcp.auth.keyring import CredentialResult
+        from tp_mcp.auth.validator import AuthResult, AuthStatus
+        from tp_mcp.cli import cmd_push_cookie
+
+        with (
+            patch("tp_mcp.cli.get_credential") as mock_get_credential,
+            patch("tp_mcp.cli.validate_auth_sync") as mock_validate,
+            patch("tp_mcp.cli.store_credential") as mock_store_credential,
+            patch("shutil.which", return_value="/usr/local/bin/vercel"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_get_credential.return_value = CredentialResult(success=True, message="ok", cookie="stored-cookie")
+            mock_validate.return_value = AuthResult(
+                status=AuthStatus.VALID, message="Valid", email="a@b.com", athlete_id=123
+            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            exit_code = cmd_push_cookie(from_stored=True, target="production")
+
+        assert exit_code == 0
+        mock_store_credential.assert_not_called()
+
+        add_calls = [
+            call for call in mock_run.call_args_list if call.args and "add" in call.args[0]
+        ]
+        assert add_calls, "expected a 'vercel env add' subprocess.run call"
+        assert add_calls[0].kwargs.get("input") == "stored-cookie"
+
+    def test_from_stored_returns_error_when_no_credential_stored(self):
+        from tp_mcp.auth.keyring import CredentialResult
+        from tp_mcp.cli import cmd_push_cookie
+
+        with (
+            patch("tp_mcp.cli.get_credential") as mock_get_credential,
+            patch("subprocess.run", side_effect=AssertionError("subprocess.run must not be called")),
+        ):
+            mock_get_credential.return_value = CredentialResult(success=False, message="No credential found")
+
+            exit_code = cmd_push_cookie(from_stored=True, target="production")
+
+        assert exit_code == 1
+
+    def test_from_stored_aborts_when_stored_cookie_fails_validation(self):
+        from tp_mcp.auth.keyring import CredentialResult
+        from tp_mcp.auth.validator import AuthResult, AuthStatus
+        from tp_mcp.cli import cmd_push_cookie
+
+        with (
+            patch("tp_mcp.cli.get_credential") as mock_get_credential,
+            patch("tp_mcp.cli.validate_auth_sync") as mock_validate,
+            patch("subprocess.run", side_effect=AssertionError("subprocess.run must not be called")),
+        ):
+            mock_get_credential.return_value = CredentialResult(success=True, message="ok", cookie="stale-cookie")
+            mock_validate.return_value = AuthResult(status=AuthStatus.INVALID, message="Cookie expired")
+
+            exit_code = cmd_push_cookie(from_stored=True, target="production")
+
+        assert exit_code == 1

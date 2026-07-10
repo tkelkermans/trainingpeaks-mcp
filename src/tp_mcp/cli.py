@@ -189,11 +189,15 @@ def cmd_serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 800
     return 0
 
 
-def cmd_push_cookie(from_browser: str = "chrome", target: str = "production") -> int:
-    """Extract a fresh TrainingPeaks cookie and push it to Vercel.
+def cmd_push_cookie(
+    from_browser: str | None = None, from_stored: bool = False, target: str = "production"
+) -> int:
+    """Push a TrainingPeaks cookie to Vercel from a browser or the local store.
 
     Args:
-        from_browser: Browser to extract cookie from (chrome, firefox, etc.)
+        from_browser: Browser to extract cookie from (chrome, firefox, etc.).
+                      Defaults to "chrome" when neither source is specified.
+        from_stored: Read the cookie from the local credential store instead of a browser.
         target: Vercel environment to push to (production, preview, development).
 
     Returns:
@@ -202,13 +206,29 @@ def cmd_push_cookie(from_browser: str = "chrome", target: str = "production") ->
     import shutil
     import subprocess
 
-    print(f"Extracting cookie from {from_browser}...")
-    browser_result = extract_tp_cookie(from_browser if from_browser != "auto" else None)
-    if not browser_result.success:
-        print(f"Error: {browser_result.message}")
-        return 1
-    cookie = browser_result.cookie
-    print(f"Found cookie in {browser_result.browser}")
+    if from_stored:
+        # Cookie was already stored by 'tp-mcp auth', so don't re-store it below.
+        cred = get_credential()
+        if not cred.success or not cred.cookie:
+            print(f"Error: {cred.message}")
+            print("No stored credential found. Run 'tp-mcp auth' first to paste a cookie.")
+            return 1
+        cookie = cred.cookie
+        print("Using stored credential.")
+    else:
+        browser = from_browser or "chrome"
+        print(f"Extracting cookie from {browser}...")
+        browser_result = extract_tp_cookie(browser if browser != "auto" else None)
+        if not browser_result.success or not browser_result.cookie:
+            print(f"Error: {browser_result.message}")
+            print()
+            print("macOS may be blocking browser cookie access (Full Disk Access required for your")
+            print("terminal: System Settings > Privacy & Security > Full Disk Access).")
+            print("Alternative that needs no browser access: run 'tp-mcp auth' to paste the cookie,")
+            print("then 'tp-mcp push-cookie --from-stored'.")
+            return 1
+        cookie = browser_result.cookie
+        print(f"Found cookie in {browser_result.browser}")
 
     print("Validating...")
     result = validate_auth_sync(cookie)
@@ -220,10 +240,11 @@ def cmd_push_cookie(from_browser: str = "chrome", target: str = "production") ->
     print(f"  Email: {result.email}")
     print(f"  Athlete ID: {result.athlete_id}")
 
-    # Keep local stdio credentials in sync too.
-    store_result = store_credential(cookie)
-    if not store_result.success:
-        print(f"Warning: could not update local credential: {store_result.message}")
+    # Keep local stdio credentials in sync when extracted from a browser.
+    if not from_stored:
+        store_result = store_credential(cookie)
+        if not store_result.success:
+            print(f"Warning: could not update local credential: {store_result.message}")
 
     if not shutil.which("vercel"):
         print("Error: vercel CLI not found. Install it with: npm i -g vercel")
@@ -370,6 +391,8 @@ def cmd_help() -> int:
     print("    --port X           Port to bind to for http transport (default 8000)")
     print("  push-cookie           Refresh the TrainingPeaks cookie and push it to Vercel")
     print("    --from-browser X   Extract cookie from browser (chrome, firefox, safari, edge, auto)")
+    print("    --from-stored      Use the cookie from 'tp-mcp auth' (no browser access; avoids the")
+    print("                       macOS Full Disk Access requirement for reading browser cookies)")
     print("    --target X         Vercel environment to push to (default production)")
     print("  schedule              Print a launchd plist that runs push-cookie weekly")
     print("  help                  Show this help message")
@@ -445,10 +468,11 @@ def main() -> int:
                 return 1
         return cmd_serve(transport=transport, host=host, port=port)
 
-    # Handle push-cookie command with optional --from-browser/--target flags
+    # Handle push-cookie command with optional --from-browser/--from-stored/--target flags
     if command == "push-cookie":
         args = sys.argv[2:]
-        from_browser = "chrome"
+        from_browser = None
+        from_stored = "--from-stored" in args
         target = "production"
         if "--from-browser" in args:
             idx = args.index("--from-browser")
@@ -457,6 +481,9 @@ def main() -> int:
             else:
                 print("Error: --from-browser requires a browser name (chrome, firefox, auto, etc.)")
                 return 1
+        if from_browser is not None and from_stored:
+            print("Error: --from-browser and --from-stored are mutually exclusive.")
+            return 1
         if "--target" in args:
             idx = args.index("--target")
             if idx + 1 < len(args):
@@ -464,7 +491,7 @@ def main() -> int:
             else:
                 print("Error: --target requires a value (e.g. production, preview)")
                 return 1
-        return cmd_push_cookie(from_browser=from_browser, target=target)
+        return cmd_push_cookie(from_browser=from_browser, from_stored=from_stored, target=target)
 
     commands = {
         "auth-status": cmd_auth_status,
