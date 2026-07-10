@@ -293,3 +293,67 @@ ruff check src/
 ## Licence
 
 MIT
+
+---
+
+## Hosted deployment (Vercel)
+
+The setup above runs the server as a local stdio subprocess, so it's only reachable from the machine it's installed on. If you'd rather use TrainingPeaks from claude.ai, Claude mobile, Claude Code, ChatGPT, or Grok, you can deploy the server to Vercel instead. It runs there over the streamable HTTP transport behind a secret URL, and is designed for single-user use (your own TrainingPeaks account, your own deployment).
+
+### Deploy
+
+```bash
+# one-time setup
+vercel link
+python -c 'import secrets; print(secrets.token_urlsafe(32))'   # -> MCP_AUTH_SECRET
+vercel env add MCP_AUTH_SECRET production
+tp-mcp push-cookie --from-browser chrome   # extracts + validates + uploads TP_AUTH_COOKIE
+vercel --prod
+```
+
+Your endpoint is `https://<project>.vercel.app/mcp/<MCP_AUTH_SECRET>`.
+
+### Security model
+
+The secret in the URL path acts as a password - it's compared with a constant-time check (`hmac.compare_digest`), so it can't be leaked via timing attacks. If your client supports custom headers instead, you can call `/mcp` with `Authorization: Bearer <secret>` rather than putting the secret in the path.
+
+To rotate the secret, set a new `MCP_AUTH_SECRET` env var and redeploy - the old URL stops working immediately.
+
+Note that because the secret lives in the URL, it will appear in Vercel's request logs. This is an accepted tradeoff for a single-user deployment; if that's not acceptable for your use case, use the Bearer header form instead and avoid the path variant.
+
+### Connect your client
+
+- **claude.ai**: Settings -> Connectors -> Add custom connector -> paste your endpoint URL.
+- **Claude Code**: `claude mcp add --transport http trainingpeaks <url>`
+- **ChatGPT**: Settings -> Apps & Connectors (developer mode) -> Add MCP server -> paste your endpoint URL.
+- **Grok**: Settings -> Connectors -> add a remote MCP URL.
+
+### Refreshing the cookie
+
+TrainingPeaks' login form is protected by reCAPTCHA, so the server can't log itself in - the `Production_tpAuth` cookie has to be minted from a real, already-logged-in browser and pushed up. `tp-mcp push-cookie` does the whole thing in one command: it extracts the cookie from your browser, validates it against TrainingPeaks, uploads it as the `TP_AUTH_COOKIE` env var, and redeploys.
+
+To make this hands-off, schedule it to run weekly:
+
+```bash
+tp-mcp schedule > ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
+launchctl load ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
+```
+
+From then on the cookie refreshes itself weekly, as long as your machine is on and you're still logged into TrainingPeaks in that browser. You can also just run `tp-mcp push-cookie` manually any time.
+
+### Local HTTP mode
+
+You can also run the HTTP transport locally instead of deploying:
+
+```bash
+MCP_AUTH_SECRET=devsecret tp-mcp serve --transport http --port 8000
+```
+
+Binding to `localhost` works without a secret configured; binding to any non-localhost host refuses to start unless `MCP_AUTH_SECRET` is set.
+
+### Known limitations
+
+- File tools (`tp_download_workout_file`, `tp_analyze_workout` artifacts) write to the function's ephemeral tmp directory, so the paths they return are meaningless to a remote client - prefer base64 upload where the client supports it.
+- Vercel enforces a 4.5 MB request/response body cap.
+- When the cookie expires, tool calls fail with `AUTH_EXPIRED` - just run `tp-mcp push-cookie` again.
+- Preview deployments have Vercel's deployment protection enabled by default, which blocks MCP clients with an SSO page. Use the production deployment, or disable deployment protection for the project.
