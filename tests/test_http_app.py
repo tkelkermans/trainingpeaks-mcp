@@ -217,6 +217,35 @@ class TestPushCookieGuards:
         assert add_calls, "expected a 'vercel env add' subprocess.run call"
         assert add_calls[0].kwargs.get("input") == "stored-cookie"
 
+    def test_production_push_redeploys_with_a_supported_vercel_command(self):
+        """'vercel redeploy' needs an existing deployment URL, so the production push must
+        use 'vercel deploy --prod'. Asserting the exact argv guards against unsupported flags.
+        """
+        from unittest.mock import MagicMock
+
+        from tp_mcp.auth.keyring import CredentialResult
+        from tp_mcp.auth.validator import AuthResult, AuthStatus
+        from tp_mcp.cli import cmd_push_cookie
+
+        with (
+            patch("tp_mcp.cli.get_credential") as mock_get_credential,
+            patch("tp_mcp.cli.validate_auth_sync") as mock_validate,
+            patch("shutil.which", return_value="/usr/local/bin/vercel"),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_get_credential.return_value = CredentialResult(success=True, message="ok", cookie="stored-cookie")
+            mock_validate.return_value = AuthResult(
+                status=AuthStatus.VALID, message="Valid", email="a@b.com", athlete_id=123
+            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            exit_code = cmd_push_cookie(from_stored=True, target="production")
+
+        assert exit_code == 0
+        argvs = [call.args[0] for call in mock_run.call_args_list if call.args]
+        assert ["vercel", "deploy", "--prod", "--yes"] in argvs, f"no supported deploy command in {argvs}"
+        assert not any("redeploy" in argv for argv in argvs), "'vercel redeploy' requires a deployment URL"
+
     def test_from_stored_returns_error_when_no_credential_stored(self):
         from tp_mcp.auth.keyring import CredentialResult
         from tp_mcp.cli import cmd_push_cookie

@@ -267,7 +267,9 @@ def cmd_push_cookie(
 
     if target == "production":
         print("Redeploying to bake in the new cookie...")
-        redeploy_result = subprocess.run(["vercel", "redeploy", "--prod"], capture_output=True, text=True)
+        # 'vercel deploy' rather than 'vercel redeploy': the latter needs an existing
+        # deployment URL, so it cannot run before the project's first deployment.
+        redeploy_result = subprocess.run(["vercel", "deploy", "--prod", "--yes"], capture_output=True, text=True)
         if redeploy_result.returncode != 0:
             print("Error: redeploy failed.")
             print(redeploy_result.stderr)
