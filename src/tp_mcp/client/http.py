@@ -373,6 +373,9 @@ class TPClient:
             except Exception:
                 return APIResponse(success=True, data=None)
 
+        if response.status_code == 204:
+            return APIResponse(success=True, data=None)
+
         if response.status_code == 401:
             # Don't auto-clear - could be temporary. User can run 'tp-mcp auth-clear' if needed.
             return APIResponse(

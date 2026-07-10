@@ -63,7 +63,7 @@ async def validate_auth(cookie: str) -> AuthResult:
 
             if response.status_code == 200:
                 data = response.json()
-                token_info = data.get("token", {})
+                token_info = data.get("token") or {}
                 access_token = token_info.get("access_token")
 
                 # Token endpoint only returns the token, not user info.
