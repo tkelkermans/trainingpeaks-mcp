@@ -216,7 +216,6 @@ async def tp_update_ftp(ftp: int) -> dict[str, Any]:
                 round(params.ftp * ratio)
                 for ratio in (0.56, 0.76, 0.91, 1.06, 1.21)
             ]
-
         zones = []
         lower_bound = 0
         for label, upper_bound in zip(labels[:-1], zone_maxima, strict=False):

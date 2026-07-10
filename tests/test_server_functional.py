@@ -79,6 +79,11 @@ class TestListTools:
             "tp_delete_event",
             "tp_create_note",
             "tp_delete_note",
+            "tp_get_note",
+            "tp_update_note",
+            "tp_get_note_comments",
+            "tp_add_note_comment",
+            "tp_list_notes",
             "tp_get_availability",
             "tp_create_availability",
             "tp_delete_availability",
@@ -94,6 +99,10 @@ class TestListTools:
             "tp_upload_workout_file",
             "tp_download_workout_file",
             "tp_delete_workout_file",
+            "tp_pair_workout",
+            "tp_unpair_workout",
+            "tp_set_workout_note",
+            "tp_get_workout_note",
         }
         assert v2_tools.issubset(names)
         assert len(names) == len(core_tools) + len(v2_tools)
@@ -107,9 +116,12 @@ class TestListTools:
         assert "distance_km" in props
         assert "tss_planned" in props
         assert "structured_workout" in props
+        assert "is_hidden" in props
         assert "distance_km" not in cw.inputSchema["required"]
         assert "tss_planned" not in cw.inputSchema["required"]
         assert "structured_workout" not in cw.inputSchema["required"]
+        assert "is_hidden" not in cw.inputSchema["required"]
+        assert props["is_hidden"]["default"] is False
 
     @pytest.mark.asyncio
     async def test_update_workout_schema_includes_structured_workout(self):
@@ -118,6 +130,7 @@ class TestListTools:
         props = uw.inputSchema["properties"]
         assert "structure" in props
         assert "structured_workout" in props
+        assert "is_hidden" in props
 
     @pytest.mark.asyncio
     async def test_workout_tools_schema_advertises_datetime_dates(self):
@@ -128,6 +141,18 @@ class TestListTools:
 
         assert "YYYY-MM-DDTHH:MM:SS" in create_tool.inputSchema["properties"]["date"]["description"]
         assert "YYYY-MM-DDTHH:MM:SS" in update_tool.inputSchema["properties"]["date"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_workout_feedback_schema_describes_ranges(self):
+        """Create/update workout schemas should document subjective feedback ranges."""
+        tools = await list_tools()
+        create_tool = next(t for t in tools if t.name == "tp_create_workout")
+        update_tool = next(t for t in tools if t.name == "tp_update_workout")
+
+        for tool in (create_tool, update_tool):
+            props = tool.inputSchema["properties"]
+            assert props["feeling"]["description"] == "TrainingPeaks feeling value (0-10)."
+            assert props["rpe"]["description"] == "Rating of perceived exertion (RPE), 0-10."
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +377,64 @@ class TestCreateWorkoutDispatch:
         assert result["error_code"] == "VALIDATION_ERROR"
 
     @pytest.mark.asyncio
+    async def test_success_without_optional_fields(self):
+        """Basic create without distance_km / tss_planned."""
+        create_response = APIResponse(
+            success=True,
+            data={"workoutId": 9001, "title": "Easy Run", "workoutDay": "2026-01-10T00:00:00"},
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = _parse_result(
+                await call_tool(
+                    "tp_create_workout",
+                    {"date": "2026-01-10", "sport": "Run", "title": "Easy Run", "duration_minutes": 45},
+                )
+            )
+
+        assert result["success"] is True
+        assert result["workout_id"] == 9001
+        payload = mock_instance.post.call_args[1]["json"]
+        assert "distancePlanned" not in payload
+        assert "tssPlanned" not in payload
+
+    @pytest.mark.asyncio
+    async def test_hidden_reaches_api_payload(self):
+        """The public is_hidden argument should map to TrainingPeaks isHidden."""
+        create_response = APIResponse(
+            success=True,
+            data={"workoutId": 9004, "title": "Hidden Run", "workoutDay": "2026-01-10T00:00:00"},
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = _parse_result(
+                await call_tool(
+                    "tp_create_workout",
+                    {
+                        "date": "2026-01-10",
+                        "sport": "Run",
+                        "title": "Hidden Run",
+                        "duration_minutes": 45,
+                        "is_hidden": True,
+                    },
+                )
+            )
+
+        assert result["success"] is True
+        payload = mock_instance.post.call_args[1]["json"]
+        assert payload["isHidden"] is True
+
+    @pytest.mark.asyncio
     async def test_datetime_date_reaches_api_payload(self):
         """Create should pass an explicit start time through the MCP handler."""
         create_response = APIResponse(
@@ -382,33 +465,6 @@ class TestCreateWorkoutDispatch:
         payload = mock_instance.post.call_args[1]["json"]
         assert payload["workoutDay"] == "2026-01-10T00:00:00"
         assert payload["startTimePlanned"] == "2026-01-10T18:15:00"
-
-    @pytest.mark.asyncio
-    async def test_success_without_optional_fields(self):
-        """Basic create without distance_km / tss_planned."""
-        create_response = APIResponse(
-            success=True,
-            data={"workoutId": 9001, "title": "Easy Run", "workoutDay": "2026-01-10T00:00:00"},
-        )
-
-        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=create_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            result = _parse_result(
-                await call_tool(
-                    "tp_create_workout",
-                    {"date": "2026-01-10", "sport": "Run", "title": "Easy Run", "duration_minutes": 45},
-                )
-            )
-
-        assert result["success"] is True
-        assert result["workout_id"] == 9001
-        payload = mock_instance.post.call_args[1]["json"]
-        assert "distancePlanned" not in payload
-        assert "tssPlanned" not in payload
 
     @pytest.mark.asyncio
     async def test_success_with_distance_and_tss(self):
@@ -471,23 +527,6 @@ class TestCreateWorkoutDispatch:
         assert result["isError"] is True
         assert result["error_code"] == "VALIDATION_ERROR"
 
-    @pytest.mark.asyncio
-    async def test_negative_tss_rejected(self):
-        result = _parse_result(
-            await call_tool(
-                "tp_create_workout",
-                {
-                    "date": "2026-01-10",
-                    "sport": "Run",
-                    "title": "Test",
-                    "duration_minutes": 60,
-                    "tss_planned": -10,
-                },
-            )
-        )
-        assert result["isError"] is True
-        assert result["error_code"] == "VALIDATION_ERROR"
-
 
 # ---------------------------------------------------------------------------
 # call_tool: tp_update_workout
@@ -528,6 +567,23 @@ class TestUpdateWorkoutDispatch:
         assert payload["workoutDay"] == "2026-04-14T00:00:00"
         assert payload["startTimePlanned"] == "2026-04-14T16:45:00"
         assert payload["description"] == "Kräftigung"
+
+    @pytest.mark.asyncio
+    async def test_negative_tss_rejected(self):
+        result = _parse_result(
+            await call_tool(
+                "tp_create_workout",
+                {
+                    "date": "2026-01-10",
+                    "sport": "Run",
+                    "title": "Test",
+                    "duration_minutes": 60,
+                    "tss_planned": -10,
+                },
+            )
+        )
+        assert result["isError"] is True
+        assert result["error_code"] == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------

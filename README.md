@@ -24,7 +24,7 @@ Ask your AI assistant things like:
 - "Set my FTP to 310 and update my power zones"
 - "Add a calendar note for next Monday: rest day, travel"
 
-## Tools (56)
+## Tools (65)
 
 ### Workouts
 | Tool | Description |
@@ -36,9 +36,13 @@ Ask your AI assistant things like:
 | `tp_delete_workout` | Delete a workout |
 | `tp_copy_workout` | Copy a workout to a new date (preserves structure and planned fields) |
 | `tp_reorder_workouts` | Reorder workouts on a given day |
+| `tp_pair_workout` | Pair a completed workout with a planned workout (merges into one) |
+| `tp_unpair_workout` | Unpair a workout (splits into separate completed and planned workouts) |
 | `tp_validate_structure` | Validate interval structure without creating a workout |
 | `tp_get_workout_comments` | Get comments on a workout |
 | `tp_add_workout_comment` | Add a comment to a workout |
+| `tp_get_workout_note` | Get the private workout note for a workout |
+| `tp_set_workout_note` | Set or update the private workout note |
 
 ### Workout Files
 | Tool | Description |
@@ -89,10 +93,15 @@ Ask your AI assistant things like:
 | `tp_get_next_event` | Get nearest future event |
 | `tp_get_events` | List events in a date range |
 | `tp_create_event` | Add a race/event with priority (A/B/C) and CTL target |
-| `tp_update_event` | Update event details |
+| `tp_update_event` | Update event details, attach workouts as legs (multisport) |
 | `tp_delete_event` | Delete an event |
 | `tp_create_note` | Create a calendar note |
+| `tp_list_notes` | List calendar notes for a date range |
+| `tp_get_note` | Get a calendar note by ID |
+| `tp_update_note` | Update title, description, date or visibility of a note |
 | `tp_delete_note` | Delete a calendar note |
+| `tp_get_note_comments` | List all comments on a note |
+| `tp_add_note_comment` | Add a comment to a note |
 | `tp_get_availability` | List unavailable/limited periods |
 | `tp_create_availability` | Mark dates as unavailable or limited |
 | `tp_delete_availability` | Remove availability entry |
@@ -240,12 +249,12 @@ You can use the same simplified `structure` object with `tp_update_workout`:
   "structure": {
     "primaryIntensityMetric": "percentOfThresholdHr",
     "steps": [
-      {"name": "Einlaufen", "duration_seconds": 900, "intensity_min": 65, "intensity_max": 80, "intensityClass": "warmUp"},
-      {"type": "repetition", "name": "4x5min zügig kontrolliert", "reps": 4, "steps": [
-        {"name": "Intervall", "duration_seconds": 300, "intensity_min": 89, "intensity_max": 94, "intensityClass": "active"},
-        {"name": "Trabpause", "duration_seconds": 180, "intensity_min": 65, "intensity_max": 83, "intensityClass": "rest"}
+      {"name": "Warm-up", "duration_seconds": 900, "intensity_min": 65, "intensity_max": 80, "intensityClass": "warmUp"},
+      {"type": "repetition", "name": "4x5min controlled tempo", "reps": 4, "steps": [
+        {"name": "Interval", "duration_seconds": 300, "intensity_min": 89, "intensity_max": 94, "intensityClass": "active"},
+        {"name": "Jog recovery", "duration_seconds": 180, "intensity_min": 65, "intensity_max": 83, "intensityClass": "rest"}
       ]},
-      {"name": "Auslaufen", "duration_seconds": 600, "intensity_min": 65, "intensity_max": 80, "intensityClass": "coolDown"}
+      {"name": "Cool-down", "duration_seconds": 600, "intensity_min": 65, "intensity_max": 80, "intensityClass": "coolDown"}
     ]
   }
 }
@@ -254,6 +263,8 @@ You can use the same simplified `structure` object with `tp_update_workout`:
 If `duration_minutes` and `tss_planned` are omitted, they are derived from the structure. If you pass them explicitly, they override the derived values.
 
 For advanced round-trip use cases, `tp_create_workout` and `tp_update_workout` also accept a native `structured_workout` payload in TrainingPeaks builder format. When a workout already has a native structure, `tp_get_workout` returns it as `structured_workout`.
+
+Workout comments are exposed via `tp_get_workout()["workout_comments"]` or `tp_get_workout_comments()`. The older top-level `coach_comments` and `athlete_comments` fields are no longer returned by `tp_get_workout`.
 
 ```json
 {

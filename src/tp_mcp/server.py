@@ -16,6 +16,7 @@ from mcp.types import (
 from tp_mcp.auth import get_credential, validate_auth
 from tp_mcp.client.context import athlete_override
 from tp_mcp.tools import (
+    tp_add_note_comment,
     tp_add_workout_comment,
     tp_analyze_workout,
     tp_auth_status,
@@ -47,6 +48,8 @@ from tp_mcp.tools import (
     tp_get_library_items,
     tp_get_metrics,
     tp_get_next_event,
+    tp_get_note,
+    tp_get_note_comments,
     tp_get_nutrition,
     tp_get_peaks,
     tp_get_pool_length_settings,
@@ -54,25 +57,32 @@ from tp_mcp.tools import (
     tp_get_weekly_summary,
     tp_get_workout,
     tp_get_workout_comments,
+    tp_get_workout_note,
     tp_get_workout_prs,
     tp_get_workout_types,
     tp_get_workouts,
     tp_list_athletes,
+    tp_list_notes,
     tp_log_metrics,
+    tp_pair_workout,
     tp_refresh_auth,
     tp_reorder_workouts,
     tp_schedule_library_workout,
+    tp_set_workout_note,
+    tp_unpair_workout,
     tp_update_equipment,
     tp_update_event,
     tp_update_ftp,
     tp_update_hr_zones,
     tp_update_library_item,
+    tp_update_note,
     tp_update_nutrition,
     tp_update_speed_zones,
     tp_update_workout,
     tp_upload_workout_file,
     tp_validate_structure,
 )
+from tp_mcp.tools.events import EVENT_TYPES
 from tp_mcp.tools.workouts import SPORT_TYPE_MAP
 
 # Configure logging to stderr (stdout is used for MCP protocol)
@@ -119,6 +129,8 @@ RAW_STRUCTURE_DESCRIPTION = (
     "structure, polyline, primaryLengthMetric, primaryIntensityMetric, and "
     "primaryIntensityTargetOrRange."
 )
+WORKOUT_FEELING_DESCRIPTION = "TrainingPeaks feeling value (0-10)."
+WORKOUT_RPE_DESCRIPTION = "Rating of perceived exertion (RPE), 0-10."
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +227,13 @@ TOOLS = [
                     "description": "Workout subtype ID from tp_get_workout_types",
                 },
                 "tags": {"type": "string", "description": "Optional comma-separated tags"},
-                "feeling": {"type": "integer", "description": "Feeling score 0-10"},
-                "rpe": {"type": "integer", "description": "RPE score 1-10"},
+                "feeling": {"type": "integer", "description": WORKOUT_FEELING_DESCRIPTION},
+                "rpe": {"type": "integer", "description": WORKOUT_RPE_DESCRIPTION},
+                "is_hidden": {
+                    "type": "boolean",
+                    "description": "Whether to hide the workout",
+                    "default": False,
+                },
             },
             "required": ["date", "sport", "title"],
         },
@@ -243,8 +260,12 @@ TOOLS = [
                 "tags": {"type": "string"},
                 "athlete_comment": {"type": "string"},
                 "coach_comment": {"type": "string"},
-                "feeling": {"type": "integer", "description": "0-10"},
-                "rpe": {"type": "integer", "description": "1-10"},
+                "feeling": {"type": "integer", "description": WORKOUT_FEELING_DESCRIPTION},
+                "rpe": {"type": "integer", "description": WORKOUT_RPE_DESCRIPTION},
+                "is_hidden": {
+                    "type": "boolean",
+                    "description": "Whether to hide the workout"
+                },
                 "structure": {
                     "type": ["object", "string"],
                     "description": STRUCTURE_DESCRIPTION,
@@ -295,6 +316,44 @@ TOOLS = [
         },
     ),
     Tool(
+        name="tp_unpair_workout",
+        description=(
+            "Unpair a workout. Detaches the completed workout file from the "
+            "planned workout, creating two separate workouts. No data is lost."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workout_id": {
+                    "type": "string",
+                    "description": "The ID of the paired workout to unpair.",
+                },
+            },
+            "required": ["workout_id"],
+        },
+    ),
+    Tool(
+        name="tp_pair_workout",
+        description=(
+            "Pair a completed workout with a planned workout. Attaches the "
+            "completed data to the planned workout, merging them into one."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "completed_workout_id": {
+                    "type": "string",
+                    "description": "The ID of the completed (actual) workout.",
+                },
+                "planned_workout_id": {
+                    "type": "string",
+                    "description": "The ID of the planned workout to pair with.",
+                },
+            },
+            "required": ["completed_workout_id", "planned_workout_id"],
+        },
+    ),
+    Tool(
         name="tp_get_workout_comments",
         description="Get comments on a workout.",
         inputSchema={
@@ -313,6 +372,27 @@ TOOLS = [
                 "comment": {"type": "string"},
             },
             "required": ["workout_id", "comment"],
+        },
+    ),
+    Tool(
+        name="tp_get_workout_note",
+        description="Get the private workout note for a workout.",
+        inputSchema={
+            "type": "object",
+            "properties": {"workout_id": {"type": "string"}},
+            "required": ["workout_id"],
+        },
+    ),
+    Tool(
+        name="tp_set_workout_note",
+        description="Set or update the private workout note for a workout.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workout_id": {"type": "string"},
+                "note": {"type": "string", "description": "Private note text. Use empty string to clear."},
+            },
+            "required": ["workout_id", "note"],
         },
     ),
     # --- Workout Files ---
@@ -648,13 +728,7 @@ TOOLS = [
             "properties": {
                 "name": {"type": "string"},
                 "date": {"type": "string", "description": "YYYY-MM-DD"},
-                "event_type": {
-                    "type": "string",
-                    "description": (
-                        "e.g. Triathlon, MultisportTriathlon, RoadRunning,"
-                        " RoadCycling, MountainBiking, OpenWaterSwimming, Other"
-                    ),
-                },
+                "event_type": {"type": "string", "enum": EVENT_TYPES},
                 "priority": {"type": "string", "enum": ["A", "B", "C"]},
                 "distance_km": {"type": "number"},
                 "ctl_target": {"type": "number"},
@@ -672,11 +746,19 @@ TOOLS = [
                 "event_id": {"type": "string"},
                 "name": {"type": "string"},
                 "date": {"type": "string"},
-                "event_type": {"type": "string"},
+                "event_type": {"type": "string", "enum": EVENT_TYPES},
                 "priority": {"type": "string", "enum": ["A", "B", "C"]},
                 "distance_km": {"type": "number"},
                 "ctl_target": {"type": "number"},
                 "description": {"type": "string"},
+                "workout_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Workout IDs to attach to the event as its legs, in order "
+                        "(e.g. swim, T1, bike, T2, run). Replaces the existing list."
+                    ),
+                },
             },
             "required": ["event_id"],
         },
@@ -710,6 +792,63 @@ TOOLS = [
             "type": "object",
             "properties": {"note_id": {"type": "string"}},
             "required": ["note_id"],
+        },
+    ),
+    Tool(
+        name="tp_get_note",
+        description="Get a calendar note by ID.",
+        inputSchema={
+            "type": "object",
+            "properties": {"note_id": {"type": "string", "description": "Note ID"}},
+            "required": ["note_id"],
+        },
+    ),
+    Tool(
+        name="tp_update_note",
+        description="Update a calendar note. Provide at least one of: title, description, date, is_hidden.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string", "description": "Note ID"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "is_hidden": {"type": "boolean"},
+            },
+            "required": ["note_id"],
+        },
+    ),
+    Tool(
+        name="tp_get_note_comments",
+        description="Get all comments on a calendar note.",
+        inputSchema={
+            "type": "object",
+            "properties": {"note_id": {"type": "string", "description": "Note ID"}},
+            "required": ["note_id"],
+        },
+    ),
+    Tool(
+        name="tp_add_note_comment",
+        description="Add a comment to a calendar note.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string", "description": "Note ID"},
+                "comment": {"type": "string", "description": "Comment text"},
+            },
+            "required": ["note_id", "comment"],
+        },
+    ),
+    Tool(
+        name="tp_list_notes",
+        description="List calendar notes for a date range.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
+                "end_date": {"type": "string", "description": "End date (YYYY-MM-DD)"},
+            },
+            "required": ["start_date", "end_date"],
         },
     ),
     Tool(
@@ -810,8 +949,14 @@ TOOLS = [
             "properties": {
                 "library_id": {"type": "string"},
                 "name": {"type": "string"},
-                "sport_family_id": {"type": "integer"},
-                "sport_type_id": {"type": "integer"},
+                "sport_family_id": {
+                    "type": "integer",
+                    "description": "Sport ID (e.g. 2=Bike; see tp_get_workout_types)",
+                },
+                "sport_type_id": {
+                    "type": "integer",
+                    "description": "Sport subtype ID (e.g. 3=Road Bike)",
+                },
                 "duration_hours": {"type": "number"},
                 "tss": {"type": "number"},
                 "description": {"type": "string"},
@@ -833,6 +978,14 @@ TOOLS = [
                 "tss": {"type": "number"},
                 "description": {"type": "string"},
                 "structure": {"type": "object"},
+                "workout_type_id": {
+                    "type": "integer",
+                    "description": (
+                        "Sport/workout type: 1=swim, 2=bike, 3=run, etc. "
+                        "Sets the sport on templates saved without one."
+                    ),
+                },
+                "workout_sub_type_id": {"type": "integer"},
             },
             "required": ["library_id", "item_id"],
         },
@@ -934,6 +1087,7 @@ async def _h_create_workout(args):
         structured_workout=args.get("structured_workout"),
         subtype_id=args.get("subtype_id"), tags=args.get("tags"),
         feeling=args.get("feeling"), rpe=args.get("rpe"),
+        is_hidden=args.get("is_hidden", False),
     )
 
 @_handler("tp_update_workout")
@@ -948,6 +1102,7 @@ async def _h_update_workout(args):
         coach_comment=args.get("coach_comment"), feeling=args.get("feeling"),
         rpe=args.get("rpe"), structure=args.get("structure"),
         structured_workout=args.get("structured_workout"),
+        is_hidden=args.get("is_hidden"),
     )
 
 @_handler("tp_delete_workout")
@@ -963,12 +1118,30 @@ async def _h_copy_workout(args):
 @_handler("tp_reorder_workouts")
 async def _h_reorder(args): return await tp_reorder_workouts(workout_ids=args["workout_ids"])
 
+@_handler("tp_unpair_workout")
+async def _h_unpair(args): return await tp_unpair_workout(workout_id=args["workout_id"])
+
+@_handler("tp_pair_workout")
+async def _h_pair(args):
+    return await tp_pair_workout(
+        completed_workout_id=args["completed_workout_id"],
+        planned_workout_id=args["planned_workout_id"],
+    )
+
 @_handler("tp_get_workout_comments")
 async def _h_get_comments(args): return await tp_get_workout_comments(workout_id=args["workout_id"])
 
 @_handler("tp_add_workout_comment")
 async def _h_add_comment(args):
     return await tp_add_workout_comment(workout_id=args["workout_id"], comment=args["comment"])
+
+@_handler("tp_get_workout_note")
+async def _h_get_workout_note(args):
+    return await tp_get_workout_note(workout_id=args["workout_id"])
+
+@_handler("tp_set_workout_note")
+async def _h_set_workout_note(args):
+    return await tp_set_workout_note(workout_id=args["workout_id"], note=args["note"])
 
 @_handler("tp_upload_workout_file")
 async def _h_upload_workout_file(args):
@@ -1120,7 +1293,7 @@ async def _h_update_event(args):
         event_id=args["event_id"], name=args.get("name"), date=args.get("date"),
         event_type=args.get("event_type"), priority=args.get("priority"),
         distance_km=args.get("distance_km"), ctl_target=args.get("ctl_target"),
-        description=args.get("description"),
+        description=args.get("description"), workout_ids=args.get("workout_ids"),
     )
 
 @_handler("tp_delete_event")
@@ -1134,6 +1307,30 @@ async def _h_create_note(args):
 
 @_handler("tp_delete_note")
 async def _h_delete_note(args): return await tp_delete_note(note_id=args["note_id"])
+
+@_handler("tp_get_note")
+async def _h_get_note(args): return await tp_get_note(note_id=args["note_id"])
+
+@_handler("tp_update_note")
+async def _h_update_note(args):
+    return await tp_update_note(
+        note_id=args["note_id"],
+        title=args.get("title"),
+        description=args.get("description"),
+        date=args.get("date"),
+        is_hidden=args.get("is_hidden"),
+    )
+
+@_handler("tp_get_note_comments")
+async def _h_get_note_comments(args): return await tp_get_note_comments(note_id=args["note_id"])
+
+@_handler("tp_add_note_comment")
+async def _h_add_note_comment(args):
+    return await tp_add_note_comment(note_id=args["note_id"], comment=args["comment"])
+
+@_handler("tp_list_notes")
+async def _h_list_notes(args):
+    return await tp_list_notes(start_date=args["start_date"], end_date=args["end_date"])
 
 @_handler("tp_get_availability")
 async def _h_get_avail(args):
@@ -1186,6 +1383,8 @@ async def _h_update_lib_item(args):
         name=args.get("name"), duration_hours=args.get("duration_hours"),
         tss=args.get("tss"), description=args.get("description"),
         structure=args.get("structure"),
+        workout_type_id=args.get("workout_type_id"),
+        workout_sub_type_id=args.get("workout_sub_type_id"),
     )
 
 @_handler("tp_schedule_library_workout")

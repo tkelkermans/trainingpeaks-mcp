@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import date as date_type
 from datetime import datetime as datetime_type
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import ValidationError
 
@@ -23,6 +23,14 @@ from tp_mcp.tools.structure import (
 )
 
 logger = logging.getLogger("tp-mcp")
+
+
+class StructurePayload(NamedTuple):
+    wire_structure: dict | None
+    duration_minutes: float | None
+    intensity_factor: float | None
+    tss: float | None
+    error: str | None
 
 
 def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
@@ -44,41 +52,27 @@ def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
     return normalized
 
 
-def _format_workout_day(value: date_type | datetime_type) -> str:
-    """Format a workout day value for the TrainingPeaks API."""
-    day = value.date() if isinstance(value, datetime_type) else value
-    return f"{day.isoformat()}T00:00:00"
-
-
-def _format_start_time_planned(value: datetime_type) -> str:
-    """Format a planned start time for the TrainingPeaks API."""
-    return value.isoformat(timespec="seconds")
-
-
-def _shift_start_time_planned(existing_start_time: str, target_day: date_type) -> str | None:
-    """Move an existing planned start time to a new day, preserving its time-of-day."""
-    try:
-        start_dt = datetime_type.fromisoformat(existing_start_time)
-    except ValueError:
-        return None
-    return datetime_type.combine(target_day, start_dt.timetz()).isoformat(timespec="seconds")
-
-
 def _prepare_structure_payload(
     structure: dict[str, Any] | str | None,
-) -> tuple[dict[str, Any] | None, float | None, float | None, float | None, str | None]:
+) -> StructurePayload:
     """Parse simplified structure input and derive TP payload values."""
     if structure is None:
-        return None, None, None, None, None
+        return StructurePayload(None, None, None, None, None)
 
     try:
         parsed_structure = parse_structure_input(structure)
         wire_structure = build_wire_structure(parsed_structure)
         structure_if, structure_tss, total_seconds = compute_if_tss(parsed_structure)
-        return wire_structure, total_seconds / 60.0, structure_if, structure_tss, None
+        return StructurePayload(
+            wire_structure=wire_structure,
+            duration_minutes=total_seconds / 60.0,
+            intensity_factor=structure_if,
+            tss=structure_tss,
+            error=None,
+        )
     except (ValidationError, ValueError) as e:
         msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
-        return None, None, None, None, f"Invalid structure: {msg}"
+        return StructurePayload(None, None, None, None, f"Invalid structure: {msg}")
 
 
 def _validate_structured_workout(structured_workout: dict[str, Any]) -> str | None:
@@ -132,7 +126,6 @@ def _decode_structured_workout(raw_structure: Any) -> dict[str, Any] | None:
         return parsed if isinstance(parsed, dict) else None
     return None
 
-
 # Maps sport name to (workoutTypeFamilyId, workoutTypeValueId)
 # IDs confirmed from GET /fitness/v6/workouttypes
 SPORT_TYPE_MAP: dict[str, tuple[int, int]] = {
@@ -151,6 +144,26 @@ SPORT_TYPE_MAP: dict[str, tuple[int, int]] = {
     "Walk": (13, 13),
     "Other": (100, 100),
 }
+
+
+def _format_workout_day(value: date_type | datetime_type) -> str:
+    """Format a workout day value for the TrainingPeaks API."""
+    day = value.date() if isinstance(value, datetime_type) else value
+    return f"{day.isoformat()}T00:00:00"
+
+
+def _format_start_time_planned(value: datetime_type) -> str:
+    """Format a planned start time for the TrainingPeaks API."""
+    return value.isoformat(timespec="seconds")
+
+
+def _shift_start_time_planned(existing_start_time: str, target_day: date_type) -> str | None:
+    """Move an existing planned start time to a new day, preserving its time-of-day."""
+    try:
+        start_dt = datetime_type.fromisoformat(existing_start_time)
+    except ValueError:
+        return None
+    return datetime_type.combine(target_day, start_dt.timetz()).isoformat(timespec="seconds")
 
 
 async def tp_get_workouts(
@@ -229,6 +242,8 @@ async def tp_get_workouts(
                     "distance_planned_km": w.distance_planned / 1000 if w.distance_planned else None,
                     "distance_actual_km": w.distance_actual / 1000 if w.distance_actual else None,
                     "tss": w.tss_actual or w.tss_planned,
+                    "tss_planned": w.tss_planned,
+                    "tss_actual": w.tss_actual,
                     "description": w.description,
                 }
                 for w in workouts
@@ -309,6 +324,7 @@ async def tp_get_workout(workout_id: str) -> dict[str, Any]:
             if structured_workout is not None:
                 raw_data["structure"] = structured_workout
             workout = parse_workout_detail(raw_data)
+            workout_comments = raw_data.get("workoutComments") or []
 
             return {
                 "id": str(workout.id),
@@ -317,8 +333,11 @@ async def tp_get_workout(workout_id: str) -> dict[str, Any]:
                 "sport": workout.sport,
                 "workout_type": workout.workout_type,
                 "description": workout.description,
-                "coach_comments": workout.coach_comments,
-                "athlete_comments": workout.athlete_comments,
+                # v6 fields not exposed by the parser model.
+                "rpe": raw_data.get("rpe"),
+                "feeling": raw_data.get("feeling"),
+                "new_comment": raw_data.get("newComment"),
+                "has_private_workout_note": raw_data.get("hasPrivateWorkoutNoteForCaller"),
                 "metrics": {
                     "duration_planned": workout.duration_planned,
                     "duration_actual": workout.duration_actual,
@@ -337,6 +356,7 @@ async def tp_get_workout(workout_id: str) -> dict[str, Any]:
                 },
                 "completed": workout.completed,
                 "structured_workout": structured_workout,
+                "workout_comments": workout_comments,
                 "device_files": _extract_file_infos(details_raw, "workoutDeviceFileInfos"),
                 "attachment_files": _extract_file_infos(details_raw, "attachmentFileInfos"),
             }
@@ -374,6 +394,7 @@ async def tp_create_workout(
     tags: str | None = None,
     feeling: int | None = None,
     rpe: int | None = None,
+    is_hidden: bool | None = None,
 ) -> dict[str, Any]:
     """Create a planned workout.
 
@@ -389,8 +410,9 @@ async def tp_create_workout(
         structured_workout: Optional native TP structured workout payload.
         subtype_id: Optional workout subtype ID (e.g. Road Bike=3).
         tags: Optional comma-separated tags string.
-        feeling: Optional feeling score (0-10).
-        rpe: Optional RPE score (1-10).
+        feeling: Optional TrainingPeaks feeling value (0-10).
+        rpe: Optional RPE score (0-10).
+        is_hidden: Optional to hide the workout to the athlete.
 
     Returns:
         Dict with created workout details or error.
@@ -410,6 +432,7 @@ async def tp_create_workout(
             tags=tags,
             feeling=feeling,
             rpe=rpe,
+            is_hidden=is_hidden,
         )
     except (ValidationError, ValueError) as e:
         msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
@@ -421,14 +444,12 @@ async def tp_create_workout(
 
     family_id, type_id = SPORT_TYPE_MAP[params.sport]
 
-    wire_structure, structure_duration_minutes, structure_if, structure_tss, structure_error = (
-        _prepare_structure_payload(params.structure)
-    )
-    if structure_error is not None:
+    structure_payload = _prepare_structure_payload(params.structure)
+    if structure_payload.error is not None:
         return {
             "isError": True,
             "error_code": "VALIDATION_ERROR",
-            "message": structure_error,
+            "message": structure_payload.error,
         }
     raw_structure_payload, raw_structure_error = _encode_structured_workout(
         params.structured_workout,
@@ -442,18 +463,18 @@ async def tp_create_workout(
 
     # Use explicit duration if provided, otherwise use structure-computed
     effective_duration: float | None = float(params.duration_minutes) if params.duration_minutes is not None else None
-    if effective_duration is None and structure_duration_minutes is not None:
-        effective_duration = structure_duration_minutes
+    if effective_duration is None and structure_payload.duration_minutes is not None:
+        effective_duration = structure_payload.duration_minutes
 
     # Use explicit TSS if provided, otherwise use structure-computed
     effective_tss = params.tss_planned
-    if effective_tss is None and structure_tss is not None:
-        effective_tss = structure_tss
+    if effective_tss is None and structure_payload.tss is not None:
+        effective_tss = structure_payload.tss
 
     # Use structure IF if no explicit TSS was given
     effective_if = None
-    if params.tss_planned is None and structure_if is not None:
-        effective_if = structure_if
+    if params.tss_planned is None and structure_payload.intensity_factor is not None:
+        effective_if = structure_payload.intensity_factor
 
     async with TPClient() as client:
         athlete_id = await client.ensure_athlete_id()
@@ -470,6 +491,7 @@ async def tp_create_workout(
             "workoutTypeFamilyId": family_id,
             "workoutTypeValueId": type_id,
             "title": params.title,
+            "isHidden": params.is_hidden if params.is_hidden is not None else False,
         }
         if isinstance(params.date, datetime_type):
             payload["startTimePlanned"] = _format_start_time_planned(params.date)
@@ -487,12 +509,12 @@ async def tp_create_workout(
             payload["tssPlanned"] = effective_tss
         if effective_if is not None:
             payload["ifPlanned"] = effective_if
-        if wire_structure is not None:
-            payload["structure"] = json.dumps(wire_structure)
+        if structure_payload.wire_structure is not None:
+            payload["structure"] = json.dumps(structure_payload.wire_structure)
         elif raw_structure_payload is not None:
             payload["structure"] = raw_structure_payload
         if params.tags is not None:
-            payload["tags"] = params.tags
+            payload["userTags"] = params.tags
         if params.feeling is not None:
             payload["feeling"] = params.feeling
         if params.rpe is not None:
@@ -540,6 +562,7 @@ async def tp_update_workout(
     coach_comment: str | None = None,
     feeling: int | None = None,
     rpe: int | None = None,
+    is_hidden: bool | None = None,
     structure: dict[str, Any] | str | None = None,
     structured_workout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -569,6 +592,7 @@ async def tp_update_workout(
             coach_comment=coach_comment,
             feeling=feeling,
             rpe=rpe,
+            is_hidden=is_hidden,
             structure=structure,
             structured_workout=structured_workout,
         )
@@ -580,14 +604,12 @@ async def tp_update_workout(
             "message": msg,
         }
 
-    wire_structure, structure_duration_minutes, structure_if, structure_tss, structure_error = (
-        _prepare_structure_payload(params.structure)
-    )
-    if structure_error is not None:
+    structure_payload = _prepare_structure_payload(params.structure)
+    if structure_payload.error is not None:
         return {
             "isError": True,
             "error_code": "VALIDATION_ERROR",
-            "message": structure_error,
+            "message": structure_payload.error,
         }
     raw_structure_payload, raw_structure_error = _encode_structured_workout(
         params.structured_workout,
@@ -600,16 +622,16 @@ async def tp_update_workout(
         }
 
     effective_duration = params.duration_minutes
-    if effective_duration is None and structure_duration_minutes is not None:
-        effective_duration = structure_duration_minutes
+    if effective_duration is None and structure_payload.duration_minutes is not None:
+        effective_duration = structure_payload.duration_minutes
 
     effective_tss = params.tss_planned
-    if effective_tss is None and structure_tss is not None:
-        effective_tss = structure_tss
+    if effective_tss is None and structure_payload.tss is not None:
+        effective_tss = structure_payload.tss
 
     effective_if = None
-    if params.structure is not None and params.tss_planned is None and structure_if is not None:
-        effective_if = structure_if
+    if params.structure is not None and params.tss_planned is None and structure_payload.intensity_factor is not None:
+        effective_if = structure_payload.intensity_factor
 
     async with TPClient() as client:
         athlete_id = await client.ensure_athlete_id()
@@ -666,7 +688,7 @@ async def tp_update_workout(
         if effective_tss is not None:
             existing["tssPlanned"] = effective_tss
         if params.tags is not None:
-            existing["tags"] = params.tags
+            existing["userTags"] = params.tags
         if params.athlete_comment is not None:
             existing["athleteComments"] = params.athlete_comment
         if params.coach_comment is not None:
@@ -675,8 +697,10 @@ async def tp_update_workout(
             existing["feeling"] = params.feeling
         if params.rpe is not None:
             existing["rpe"] = params.rpe
+        if params.is_hidden is not None:
+            existing["isHidden"] = params.is_hidden
         if params.structure is not None:
-            existing["structure"] = json.dumps(wire_structure)
+            existing["structure"] = json.dumps(structure_payload.wire_structure)
             if effective_if is not None:
                 existing["ifPlanned"] = effective_if
             else:
@@ -831,10 +855,22 @@ async def tp_copy_workout(
             "ifPlanned",
             "description",
             "coachComments",
-            "tags",
         ]:
             if source.get(field) is not None:
                 payload[field] = source[field]
+
+        # Copy user tags (API uses userTags, not tags)
+        if source.get("userTags") is not None:
+            payload["userTags"] = source["userTags"]
+
+        # Shift startTimePlanned to target date, preserving time-of-day.
+        # If the value can't be parsed (unexpected format), fall back to the
+        # raw source string so the field is never silently dropped.
+        if source.get("startTimePlanned"):
+            shifted = _shift_start_time_planned(
+                source["startTimePlanned"], date_type.fromisoformat(target_date)
+            )
+            payload["startTimePlanned"] = shifted if shifted is not None else source["startTimePlanned"]
 
         # Copy structure
         if source.get("structure") is not None:
@@ -958,7 +994,7 @@ async def tp_get_workout_comments(workout_id: str) -> dict[str, Any]:
                 "message": "Could not get athlete ID. Re-authenticate.",
             }
 
-        endpoint = f"/fitness/v2/athletes/{athlete_id}/workouts/{validated.workout_id}/comments"
+        endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts/{validated.workout_id}"
         response = await client.get(endpoint)
 
         if response.is_error:
@@ -968,14 +1004,15 @@ async def tp_get_workout_comments(workout_id: str) -> dict[str, Any]:
                 "message": response.message,
             }
 
-        if not response.data:
+        raw = response.data if isinstance(response.data, dict) else {}
+        comments = raw.get("workoutComments") or []
+        if not comments:
             return {
                 "comments": [],
                 "count": 0,
                 "message": "No comments on this workout.",
             }
 
-        comments = response.data if isinstance(response.data, list) else []
         return {
             "comments": comments,
             "count": len(comments),
@@ -990,7 +1027,8 @@ async def tp_add_workout_comment(workout_id: str, comment: str) -> dict[str, Any
         comment: The comment text.
 
     Returns:
-        Dict with confirmation or error.
+        Dict with confirmation and current workoutComments from a follow-up v6 GET.
+        If the follow-up GET fails, comments is [] and comments_fetch_failed is True.
     """
     try:
         validated = WorkoutIdInput(workout_id=workout_id)
@@ -1029,7 +1067,262 @@ async def tp_add_workout_comment(workout_id: str, comment: str) -> dict[str, Any
                 "message": response.message,
             }
 
+        get_endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts/{validated.workout_id}"
+        get_response = await client.get(get_endpoint)
+        if get_response.is_error:
+            return {
+                "success": True,
+                "message": "Comment added.",
+                "comments": [],
+                "count": 0,
+                "comments_fetch_failed": True,
+            }
+
+        comments = (get_response.data or {}).get("workoutComments") or []
         return {
             "success": True,
             "message": "Comment added.",
+            "comments": comments,
+            "count": len(comments),
+        }
+
+
+async def tp_get_workout_note(workout_id: str) -> dict[str, Any]:
+    """Get the private workout note for a workout.
+
+    Args:
+        workout_id: The workout ID.
+
+    Returns:
+        Dict with note text or error.
+    """
+    try:
+        validated = WorkoutIdInput(workout_id=workout_id)
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": msg,
+        }
+
+    async with TPClient() as client:
+        athlete_id = await client.ensure_athlete_id()
+        if not athlete_id:
+            return {
+                "isError": True,
+                "error_code": "AUTH_INVALID",
+                "message": "Could not get athlete ID. Re-authenticate.",
+            }
+
+        endpoint = f"/fitness/v6/workouts/{validated.workout_id}/privateWorkoutNote"
+        response = await client.get(endpoint)
+
+        if response.is_error:
+            return {
+                "isError": True,
+                "error_code": response.error_code.value if response.error_code else "API_ERROR",
+                "message": response.message,
+            }
+
+        data = response.data if isinstance(response.data, dict) else {}
+        return {
+            "workout_id": workout_id,
+            "note": data.get("note", ""),
+            "updated_at": data.get("dateTimeUpdatedUtc"),
+        }
+
+
+async def tp_set_workout_note(workout_id: str, note: str) -> dict[str, Any]:
+    """Set or update the private workout note for a workout.
+
+    Args:
+        workout_id: The workout ID.
+        note: The private note text (use empty string to clear).
+
+    Returns:
+        Dict with confirmation or error.
+    """
+    try:
+        validated = WorkoutIdInput(workout_id=workout_id)
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": msg,
+        }
+
+    async with TPClient() as client:
+        athlete_id = await client.ensure_athlete_id()
+        if not athlete_id:
+            return {
+                "isError": True,
+                "error_code": "AUTH_INVALID",
+                "message": "Could not get athlete ID. Re-authenticate.",
+            }
+
+        endpoint = f"/fitness/v6/workouts/{validated.workout_id}/privateWorkoutNote"
+        payload = {"note": note}
+        response = await client.put(endpoint, json=payload)
+
+        if response.is_error:
+            return {
+                "isError": True,
+                "error_code": response.error_code.value if response.error_code else "API_ERROR",
+                "message": response.message,
+            }
+
+        return {
+            "success": True,
+            "message": "Workout note updated.",
+            "workout_id": workout_id,
+            "note": note,
+        }
+
+
+async def tp_unpair_workout(workout_id: str) -> dict[str, Any]:
+    """Unpair (split) a paired workout into separate completed and planned workouts.
+
+    Detaches the completed workout file from the planned workout,
+    creating two independent workouts on the same day. No data is lost.
+
+    Args:
+        workout_id: The ID of the paired workout to unpair.
+
+    Returns:
+        Dict with completed workout(s) and new planned workout info, or error.
+    """
+    try:
+        validated = WorkoutIdInput(workout_id=workout_id)
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": msg,
+        }
+
+    async with TPClient() as client:
+        athlete_id = await client.ensure_athlete_id()
+        if not athlete_id:
+            return {
+                "isError": True,
+                "error_code": "AUTH_INVALID",
+                "message": "Could not get athlete ID. Re-authenticate.",
+            }
+
+        endpoint = (
+            f"/fitness/v6/athletes/{athlete_id}"
+            f"/commands/workouts/{validated.workout_id}/split"
+        )
+        response = await client.post(endpoint)
+
+        if response.is_error:
+            return {
+                "isError": True,
+                "error_code": response.error_code.value if response.error_code else "API_ERROR",
+                "message": response.message,
+            }
+
+        if not isinstance(response.data, dict):
+            return {
+                "isError": True,
+                "error_code": "API_ERROR",
+                "message": "Unexpected response format from API.",
+            }
+
+        completed = response.data.get("completedWorkouts", [])
+        planned = response.data.get("plannedWorkout")
+
+        completed_ids = [w.get("workoutId") for w in completed if isinstance(w, dict)]
+        planned_id = planned.get("workoutId") if isinstance(planned, dict) else None
+
+        return {
+            "success": True,
+            "message": f"Workout {validated.workout_id} unpaired.",
+            "completed_workout_ids": completed_ids,
+            "planned_workout_id": planned_id,
+            "completed_workouts": completed,
+            "planned_workout": planned,
+        }
+
+
+async def tp_pair_workout(
+    completed_workout_id: str,
+    planned_workout_id: str,
+) -> dict[str, Any]:
+    """Pair (combine) a completed workout with a planned workout.
+
+    Attaches the completed workout data to the planned workout,
+    merging them into a single paired workout. All data from both
+    workouts is preserved.
+
+    Args:
+        completed_workout_id: The ID of the completed (actual) workout.
+        planned_workout_id: The ID of the planned workout to pair with.
+
+    Returns:
+        Dict with merged workout info, or error.
+    """
+    try:
+        validated_completed = WorkoutIdInput(workout_id=completed_workout_id)
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": f"Invalid completed_workout_id: {msg}",
+        }
+
+    try:
+        validated_planned = WorkoutIdInput(workout_id=planned_workout_id)
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": f"Invalid planned_workout_id: {msg}",
+        }
+
+    async with TPClient() as client:
+        athlete_id = await client.ensure_athlete_id()
+        if not athlete_id:
+            return {
+                "isError": True,
+                "error_code": "AUTH_INVALID",
+                "message": "Could not get athlete ID. Re-authenticate.",
+            }
+
+        endpoint = f"/fitness/v6/athletes/{athlete_id}/commands/workouts/combine"
+        payload = {
+            "athleteId": int(athlete_id),
+            "completedWorkoutId": int(validated_completed.workout_id),
+            "plannedWorkoutId": int(validated_planned.workout_id),
+        }
+        response = await client.post(endpoint, json=payload)
+
+        if response.is_error:
+            return {
+                "isError": True,
+                "error_code": response.error_code.value if response.error_code else "API_ERROR",
+                "message": response.message,
+            }
+
+        if not isinstance(response.data, dict):
+            return {
+                "isError": True,
+                "error_code": "API_ERROR",
+                "message": "Unexpected response format from API.",
+            }
+
+        return {
+            "success": True,
+            "message": (
+                f"Workout {validated_completed.workout_id} paired with "
+                f"planned workout {validated_planned.workout_id}."
+            ),
+            "workout_id": response.data.get("workoutId"),
+            "title": response.data.get("title"),
+            "workout": response.data,
         }

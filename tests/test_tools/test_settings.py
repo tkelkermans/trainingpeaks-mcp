@@ -90,6 +90,89 @@ class TestUpdateFTP:
         assert payload[1] == settings["powerZones"][1]
 
     @pytest.mark.asyncio
+    async def test_ftp_fallback_when_threshold_is_zero(self):
+        """FTP update uses hardcoded ratios when current_threshold is 0."""
+        response = APIResponse(success=True, data=None)
+        settings = {
+            "powerZones": [
+                {
+                    "threshold": 0,
+                    "calculationMethod": 5,
+                    "workoutTypeId": 0,
+                    "zones": [
+                        {"label": "Recovery", "minimum": 0, "maximum": 156},
+                        {"label": "Endurance", "minimum": 157, "maximum": 212},
+                        {"label": "Tempo", "minimum": 213, "maximum": 254},
+                        {"label": "Threshold", "minimum": 255, "maximum": 296},
+                        {"label": "VO2 Max", "minimum": 297, "maximum": 338},
+                        {"label": "Anaerobic Capacity", "minimum": 339, "maximum": 2000},
+                    ],
+                }
+            ],
+        }
+        with patch("tp_mcp.tools.settings.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=APIResponse(success=True, data=settings))
+            mock_instance.put = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_update_ftp(ftp=200)
+
+        assert result["success"] is True
+        assert result["ftp"] == 200
+        zones = result["zones"]
+        assert len(zones) == 6
+        # Hardcoded ratios: 0.56, 0.76, 0.91, 1.06, 1.21
+        assert zones[0]["maximum"] == round(200 * 0.56)
+        assert zones[1]["maximum"] == round(200 * 0.76)
+        assert zones[2]["maximum"] == round(200 * 0.91)
+        assert zones[3]["maximum"] == round(200 * 1.06)
+        assert zones[4]["maximum"] == round(200 * 1.21)
+        assert zones[5]["maximum"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_ftp_fallback_when_zones_malformed(self):
+        """FTP update uses hardcoded ratios when existing zones have non-numeric maxima."""
+        response = APIResponse(success=True, data=None)
+        settings = {
+            "powerZones": [
+                {
+                    "threshold": 280,
+                    "calculationMethod": 5,
+                    "workoutTypeId": 0,
+                    "zones": [
+                        {"label": "Recovery", "minimum": 0, "maximum": "bad"},
+                        {"label": "Endurance", "minimum": 157, "maximum": 212},
+                        {"label": "Tempo", "minimum": 213, "maximum": 254},
+                        {"label": "Threshold", "minimum": 255, "maximum": 296},
+                        {"label": "VO2 Max", "minimum": 297, "maximum": 338},
+                        {"label": "Anaerobic Capacity", "minimum": 339, "maximum": 2000},
+                    ],
+                }
+            ],
+        }
+        with patch("tp_mcp.tools.settings.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=APIResponse(success=True, data=settings))
+            mock_instance.put = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_update_ftp(ftp=300)
+
+        assert result["success"] is True
+        zones = result["zones"]
+        assert len(zones) == 6
+        # Falls back to hardcoded ratios: 0.56, 0.76, 0.91, 1.06, 1.21
+        assert zones[0]["maximum"] == round(300 * 0.56)
+        assert zones[1]["maximum"] == round(300 * 0.76)
+        assert zones[2]["maximum"] == round(300 * 0.91)
+        assert zones[3]["maximum"] == round(300 * 1.06)
+        assert zones[4]["maximum"] == round(300 * 1.21)
+        assert zones[5]["maximum"] == 2000
+
+    @pytest.mark.asyncio
     async def test_ftp_validation(self):
         result = await tp_update_ftp(ftp=0)
         assert result["isError"] is True
