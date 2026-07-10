@@ -172,6 +172,38 @@ class TestTpCreateWorkout:
         assert payload["totalTimePlanned"] == 1.0  # 60 min -> 1.0 hours
 
     @pytest.mark.asyncio
+    async def test_create_workout_datetime_preserves_time(self):
+        """Datetime input should schedule the workout with the provided time."""
+        create_response = APIResponse(
+            success=True,
+            data={
+                "workoutId": 5002,
+                "title": "Afternoon Run",
+                "workoutDay": "2026-01-10T00:00:00",
+                "startTimePlanned": "2026-01-10T16:45:00",
+            },
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_create_workout(
+                date_str="2026-01-10T16:45:00",
+                sport="Run",
+                title="Afternoon Run",
+                duration_minutes=45,
+            )
+
+        assert result["success"] is True
+        assert result["date"] == "2026-01-10T16:45:00"
+        payload = mock_instance.post.call_args[1]["json"]
+        assert payload["workoutDay"] == "2026-01-10T00:00:00"
+        assert payload["startTimePlanned"] == "2026-01-10T16:45:00"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "sport,expected_family,expected_value",
         [

@@ -113,6 +113,12 @@ STRUCTURE_DESCRIPTION = (
     " Intensity values are % of threshold (FTP/HR/pace)."
     " Optional per-step: cadence_min, cadence_max (rpm)."
 )
+RAW_STRUCTURE_DESCRIPTION = (
+    "Native TrainingPeaks structured workout payload in builder format. "
+    "Use this only when you already have a TP structure object with keys like "
+    "structure, polyline, primaryLengthMetric, primaryIntensityMetric, and "
+    "primaryIntensityTargetOrRange."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -179,13 +185,14 @@ TOOLS = [
     Tool(
         name="tp_create_workout",
         description=(
-            "Create a planned workout with optional interval structure. "
-            "Duration auto-computed from structure if not provided."
+            "Create a planned workout with optional simplified interval structure "
+            "or native TrainingPeaks structured_workout payload. Duration is "
+            "auto-computed only from simplified structure when not provided."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "date": {"type": "string", "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"},
                 "sport": {"type": "string", "enum": list(SPORT_TYPE_MAP.keys())},
                 "title": {"type": "string", "description": "Workout title"},
                 "duration_minutes": {
@@ -198,6 +205,10 @@ TOOLS = [
                 "structure": {
                     "type": ["object", "string"],
                     "description": STRUCTURE_DESCRIPTION,
+                },
+                "structured_workout": {
+                    "type": "object",
+                    "description": RAW_STRUCTURE_DESCRIPTION,
                 },
                 "subtype_id": {
                     "type": "integer",
@@ -212,7 +223,11 @@ TOOLS = [
     ),
     Tool(
         name="tp_update_workout",
-        description="Update fields of an existing workout. Fetches existing, merges, then saves.",
+        description=(
+            "Update fields of an existing workout. Supports the same simplified "
+            "interval structure format as tp_create_workout plus an optional native "
+            "structured_workout payload, then fetches existing, merges, and saves."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -221,7 +236,7 @@ TOOLS = [
                 "subtype_id": {"type": "integer"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "date": {"type": "string", "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"},
                 "duration_minutes": {"type": "number"},
                 "distance_km": {"type": "number"},
                 "tss_planned": {"type": "number"},
@@ -230,7 +245,14 @@ TOOLS = [
                 "coach_comment": {"type": "string"},
                 "feeling": {"type": "integer", "description": "0-10"},
                 "rpe": {"type": "integer", "description": "1-10"},
-                "structure": {"type": ["object", "string"]},
+                "structure": {
+                    "type": ["object", "string"],
+                    "description": STRUCTURE_DESCRIPTION,
+                },
+                "structured_workout": {
+                    "type": "object",
+                    "description": RAW_STRUCTURE_DESCRIPTION,
+                },
             },
             "required": ["workout_id"],
         },
@@ -442,7 +464,7 @@ TOOLS = [
     ),
     Tool(
         name="tp_update_ftp",
-        description="Update FTP and recalculate Coggan 5-zone power model.",
+        description="Update FTP and recalculate the default power zones.",
         inputSchema={
             "type": "object",
             "properties": {"ftp": {"type": "integer", "description": "FTP in watts"}},
@@ -909,6 +931,7 @@ async def _h_create_workout(args):
         duration_minutes=args.get("duration_minutes"),
         description=args.get("description"), distance_km=args.get("distance_km"),
         tss_planned=args.get("tss_planned"), structure=args.get("structure"),
+        structured_workout=args.get("structured_workout"),
         subtype_id=args.get("subtype_id"), tags=args.get("tags"),
         feeling=args.get("feeling"), rpe=args.get("rpe"),
     )
@@ -924,6 +947,7 @@ async def _h_update_workout(args):
         tags=args.get("tags"), athlete_comment=args.get("athlete_comment"),
         coach_comment=args.get("coach_comment"), feeling=args.get("feeling"),
         rpe=args.get("rpe"), structure=args.get("structure"),
+        structured_workout=args.get("structured_workout"),
     )
 
 @_handler("tp_delete_workout")

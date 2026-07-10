@@ -14,6 +14,7 @@ Connect TrainingPeaks to Claude and other AI assistants via the Model Context Pr
 
 Ask your AI assistant things like:
 - "Build me a 4x8min threshold session for Tuesday with warm-up and cool-down"
+- "Schedule my mobility session for April 14, 2026 at 16:45"
 - "Compare my FTP progression this year vs last year"
 - "Copy last week's long ride to this Saturday"
 - "Log my weight at 74.5kg and sleep at 7.5 hours"
@@ -29,8 +30,8 @@ Ask your AI assistant things like:
 |------|-------------|
 | `tp_get_workouts` | List workouts in a date range (max 90 days) |
 | `tp_get_workout` | Get full details for a single workout |
-| `tp_create_workout` | Create a workout with optional interval structure, auto-computed IF/TSS |
-| `tp_update_workout` | Update any field of an existing workout |
+| `tp_create_workout` | Create a workout with optional interval structure, auto-computed IF/TSS, and optional planned start time |
+| `tp_update_workout` | Update any field of an existing workout, including structured intervals and planned start time |
 | `tp_delete_workout` | Delete a workout |
 | `tp_copy_workout` | Copy a workout to a new date (preserves structure and planned fields) |
 | `tp_reorder_workouts` | Reorder workouts on a given day |
@@ -52,7 +53,7 @@ Ask your AI assistant things like:
 | Tool | Description |
 |------|-------------|
 | `tp_get_athlete_settings` | Get FTP, thresholds, zones, profile |
-| `tp_update_ftp` | Update FTP and recalculate Coggan 5-zone model |
+| `tp_update_ftp` | Update FTP and recalculate the default power zones |
 | `tp_update_hr_zones` | Update heart rate zones |
 | `tp_update_speed_zones` | Update run/swim pace zones |
 | `tp_update_nutrition` | Update daily planned calories |
@@ -213,6 +214,69 @@ Create workouts with full interval structure. The server auto-computes duration,
 ```
 
 The LLM builds this JSON naturally from conversation - just say "build me 4x8min sweet spot with 2min rest".
+
+You can use the same simplified `structure` object with `tp_update_workout`:
+
+```json
+{
+  "workout_id": "3658666303",
+  "duration_minutes": 57,
+  "tss_planned": 62.3,
+  "structure": {
+    "primaryIntensityMetric": "percentOfThresholdHr",
+    "steps": [
+      {"name": "Einlaufen", "duration_seconds": 900, "intensity_min": 65, "intensity_max": 80, "intensityClass": "warmUp"},
+      {"type": "repetition", "name": "4x5min zügig kontrolliert", "reps": 4, "steps": [
+        {"name": "Intervall", "duration_seconds": 300, "intensity_min": 89, "intensity_max": 94, "intensityClass": "active"},
+        {"name": "Trabpause", "duration_seconds": 180, "intensity_min": 65, "intensity_max": 83, "intensityClass": "rest"}
+      ]},
+      {"name": "Auslaufen", "duration_seconds": 600, "intensity_min": 65, "intensity_max": 80, "intensityClass": "coolDown"}
+    ]
+  }
+}
+```
+
+If `duration_minutes` and `tss_planned` are omitted, they are derived from the structure. If you pass them explicitly, they override the derived values.
+
+For advanced round-trip use cases, `tp_create_workout` and `tp_update_workout` also accept a native `structured_workout` payload in TrainingPeaks builder format. When a workout already has a native structure, `tp_get_workout` returns it as `structured_workout`.
+
+```json
+{
+  "workout_id": "3658666303",
+  "structured_workout": {
+    "structure": [],
+    "polyline": [],
+    "primaryLengthMetric": "duration",
+    "primaryIntensityMetric": "percentOfFtp",
+    "primaryIntensityTargetOrRange": "range"
+  }
+}
+```
+
+Use either `structure` or `structured_workout` in a single create/update call, not both.
+
+For planned workout scheduling, `tp_create_workout` and `tp_update_workout` accept:
+
+- `YYYY-MM-DD` for all-day planning on a calendar date
+- `YYYY-MM-DDTHH:MM:SS` for a planned start time on that date
+
+TrainingPeaks stores planned workout times separately from the calendar day. Internally this means:
+
+- `workoutDay` stays at midnight for the selected date
+- `startTimePlanned` stores the planned start time
+- planned end time is derived from `startTimePlanned + totalTimePlanned`
+
+Example with a planned start time:
+
+```json
+{
+  "date": "2026-04-14T16:45:00",
+  "sport": "Strength",
+  "title": "Core & Mobility",
+  "duration_minutes": 60,
+  "description": "Core-Stabilisation und Dehnung."
+}
+```
 
 ## What is MCP?
 

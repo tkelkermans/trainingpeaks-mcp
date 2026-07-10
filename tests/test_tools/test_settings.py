@@ -32,11 +32,37 @@ class TestGetAthleteSettings:
 class TestUpdateFTP:
     @pytest.mark.asyncio
     async def test_coggan_zones_320w(self):
-        """FTP 320W should produce correct Coggan zone boundaries."""
+        """FTP 320W should scale the existing default power zone model."""
         response = APIResponse(success=True, data=None)
+        settings = {
+            "powerZones": [
+                {
+                    "zoneCalculatorId": None,
+                    "threshold": 280,
+                    "calculationMethod": 5,
+                    "workoutTypeId": 0,
+                    "zones": [
+                        {"label": "Recovery", "minimum": 0, "maximum": 156},
+                        {"label": "Endurance", "minimum": 157, "maximum": 212},
+                        {"label": "Tempo", "minimum": 213, "maximum": 254},
+                        {"label": "Threshold", "minimum": 255, "maximum": 296},
+                        {"label": "VO2 Max", "minimum": 297, "maximum": 338},
+                        {"label": "Anaerobic Capacity", "minimum": 339, "maximum": 2000},
+                    ],
+                },
+                {
+                    "zoneCalculatorId": None,
+                    "threshold": 300,
+                    "calculationMethod": 4,
+                    "workoutTypeId": 3,
+                    "zones": [{"label": str(i), "minimum": i, "maximum": i} for i in range(1, 7)],
+                },
+            ],
+        }
         with patch("tp_mcp.tools.settings.TPClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=APIResponse(success=True, data=settings))
             mock_instance.put = AsyncMock(return_value=response)
             mock_client.return_value.__aenter__.return_value = mock_instance
 
@@ -45,16 +71,23 @@ class TestUpdateFTP:
         assert result["success"] is True
         assert result["ftp"] == 320
         zones = result["zones"]
-        assert len(zones) == 5
-        # Z1: 0-55% of 320 = 0-176
+        assert len(zones) == 6
+        # Existing maxima [156, 212, 254, 296, 338] are scaled from 280W to 320W
         assert zones[0]["minimum"] == 0
-        assert zones[0]["maximum"] == 176
-        # Z2: 56-75% = 179-240
+        assert zones[0]["maximum"] == 178
         assert zones[1]["minimum"] == 179
-        assert zones[1]["maximum"] == 240
-        # Z4: 91-105% = 291-336
+        assert zones[1]["maximum"] == 242
         assert zones[3]["minimum"] == 291
-        assert zones[3]["maximum"] == 336
+        assert zones[3]["maximum"] == 338
+        assert zones[5]["minimum"] == 387
+        assert zones[5]["maximum"] == 2000
+
+        payload = mock_instance.put.call_args[1]["json"]
+        assert len(payload) == 2
+        assert payload[0]["threshold"] == 320
+        assert payload[0]["workoutTypeId"] == 0
+        assert payload[0]["zones"] == zones
+        assert payload[1] == settings["powerZones"][1]
 
     @pytest.mark.asyncio
     async def test_ftp_validation(self):

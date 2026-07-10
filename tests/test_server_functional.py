@@ -100,14 +100,34 @@ class TestListTools:
 
     @pytest.mark.asyncio
     async def test_create_workout_schema_includes_new_fields(self):
-        """The tp_create_workout schema should advertise distance_km and tss_planned."""
+        """The tp_create_workout schema should advertise optional structured_workout support."""
         tools = await list_tools()
         cw = next(t for t in tools if t.name == "tp_create_workout")
         props = cw.inputSchema["properties"]
         assert "distance_km" in props
         assert "tss_planned" in props
+        assert "structured_workout" in props
         assert "distance_km" not in cw.inputSchema["required"]
         assert "tss_planned" not in cw.inputSchema["required"]
+        assert "structured_workout" not in cw.inputSchema["required"]
+
+    @pytest.mark.asyncio
+    async def test_update_workout_schema_includes_structured_workout(self):
+        tools = await list_tools()
+        uw = next(t for t in tools if t.name == "tp_update_workout")
+        props = uw.inputSchema["properties"]
+        assert "structure" in props
+        assert "structured_workout" in props
+
+    @pytest.mark.asyncio
+    async def test_workout_tools_schema_advertises_datetime_dates(self):
+        """Create/update workout schemas should document datetime support."""
+        tools = await list_tools()
+        create_tool = next(t for t in tools if t.name == "tp_create_workout")
+        update_tool = next(t for t in tools if t.name == "tp_update_workout")
+
+        assert "YYYY-MM-DDTHH:MM:SS" in create_tool.inputSchema["properties"]["date"]["description"]
+        assert "YYYY-MM-DDTHH:MM:SS" in update_tool.inputSchema["properties"]["date"]["description"]
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +352,38 @@ class TestCreateWorkoutDispatch:
         assert result["error_code"] == "VALIDATION_ERROR"
 
     @pytest.mark.asyncio
+    async def test_datetime_date_reaches_api_payload(self):
+        """Create should pass an explicit start time through the MCP handler."""
+        create_response = APIResponse(
+            success=True,
+            data={
+                "workoutId": 9003,
+                "title": "Evening Run",
+                "workoutDay": "2026-01-10T00:00:00",
+                "startTimePlanned": "2026-01-10T18:15:00",
+            },
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = _parse_result(
+                await call_tool(
+                    "tp_create_workout",
+                    {"date": "2026-01-10T18:15:00", "sport": "Run", "title": "Evening Run", "duration_minutes": 45},
+                )
+            )
+
+        assert result["success"] is True
+        assert result["date"] == "2026-01-10T18:15:00"
+        payload = mock_instance.post.call_args[1]["json"]
+        assert payload["workoutDay"] == "2026-01-10T00:00:00"
+        assert payload["startTimePlanned"] == "2026-01-10T18:15:00"
+
+    @pytest.mark.asyncio
     async def test_success_without_optional_fields(self):
         """Basic create without distance_km / tss_planned."""
         create_response = APIResponse(
@@ -435,6 +487,47 @@ class TestCreateWorkoutDispatch:
         )
         assert result["isError"] is True
         assert result["error_code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# call_tool: tp_update_workout
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateWorkoutDispatch:
+    """Functional tests for tp_update_workout through server dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_datetime_date_reaches_api_payload(self):
+        """Update should accept ISO datetime strings and preserve the time."""
+        existing = {
+            "workoutId": 1001,
+            "workoutDay": "2026-04-13T00:00:00",
+            "startTimePlanned": "2026-04-13T09:30:00",
+            "title": "Original",
+        }
+        get_response = APIResponse(success=True, data=existing)
+        put_response = APIResponse(success=True, data=None)
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=get_response)
+            mock_instance.put = AsyncMock(return_value=put_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = _parse_result(
+                await call_tool(
+                    "tp_update_workout",
+                    {"workout_id": "1001", "date": "2026-04-14T16:45:00", "description": "Kräftigung"},
+                )
+            )
+
+        assert result["success"] is True
+        payload = mock_instance.put.call_args[1]["json"]
+        assert payload["workoutDay"] == "2026-04-14T00:00:00"
+        assert payload["startTimePlanned"] == "2026-04-14T16:45:00"
+        assert payload["description"] == "Kräftigung"
 
 
 # ---------------------------------------------------------------------------
