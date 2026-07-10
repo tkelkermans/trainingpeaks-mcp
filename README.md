@@ -17,27 +17,35 @@ Ask your AI assistant things like:
 - "Schedule my mobility session for April 14, 2026 at 16:45"
 - "Compare my FTP progression this year vs last year"
 - "Copy last week's long ride to this Saturday"
+- "Move my 6am Tuesday ride to Thursday" (keeps the 6am start time automatically)
 - "Log my weight at 74.5kg and sleep at 7.5 hours"
 - "What's my weekly TSS so far? Am I on track for my ATP target?"
 - "Show my race calendar and how many weeks until my A race"
 - "Set my FTP to 310 and update my power zones"
 - "Add a calendar note for next Monday: rest day, travel"
 
-## Tools (52)
+## Tools (56)
 
 ### Workouts
 | Tool | Description |
 |------|-------------|
 | `tp_get_workouts` | List workouts in a date range (max 90 days) |
 | `tp_get_workout` | Get full details for a single workout |
-| `tp_create_workout` | Create a workout with optional interval structure, auto-computed IF/TSS, and optional planned start time |
-| `tp_update_workout` | Update any field of an existing workout, including structured intervals and planned start time |
+| `tp_create_workout` | Create a workout with optional simplified interval structure or native structured_workout payload, auto-computed IF/TSS, and optional planned start time |
+| `tp_update_workout` | Update any field of an existing workout, including simplified structured intervals, native structured_workout payload, and planned start time |
 | `tp_delete_workout` | Delete a workout |
 | `tp_copy_workout` | Copy a workout to a new date (preserves structure and planned fields) |
 | `tp_reorder_workouts` | Reorder workouts on a given day |
 | `tp_validate_structure` | Validate interval structure without creating a workout |
 | `tp_get_workout_comments` | Get comments on a workout |
 | `tp_add_workout_comment` | Add a comment to a workout |
+
+### Workout Files
+| Tool | Description |
+|------|-------------|
+| `tp_upload_workout_file` | Upload a workout file (.fit/.tcx/.gpx) to an existing workout |
+| `tp_download_workout_file` | Download a workout file by file_id |
+| `tp_delete_workout_file` | Delete a workout file by file_id |
 
 ### Analysis & Performance
 | Tool | Description |
@@ -108,10 +116,13 @@ Ask your AI assistant things like:
 | `tp_get_profile` | Get athlete profile |
 | `tp_auth_status` | Check authentication status |
 | `tp_refresh_auth` | Re-authenticate from browser cookie |
+| `tp_list_athletes` | List athletes available to this account (coach accounts) |
 
 ---
 
 ## Setup Options
+
+The setup below installs the server locally and runs it over stdio (the default, no network exposure). If you'd rather run it remotely for claude.ai, Claude mobile, ChatGPT, or Grok, see **Option C: Hosted (Vercel)** below, which jumps to the [Hosted deployment](#hosted-deployment-vercel) section.
 
 ### Option A: Auto-Setup with Claude Code
 
@@ -142,11 +153,11 @@ pip install -e .
 If you're logged into TrainingPeaks in your browser:
 
 ```bash
-pip install tp-mcp[browser]  # One-time: install browser support
-tp-mcp auth --from-browser chrome  # Or: firefox, safari, edge, auto
+pip install -e ".[browser]"  # One-time: install browser support against your clone
+tp-mcp auth --from-browser chrome  # Or: firefox, safari, edge, chromium, brave, opera, auto
 ```
 
-> **macOS note:** You may see security prompts for Keychain or Full Disk Access. This is normal - browser cookies are encrypted and require permission to read.
+> **macOS note:** Reading a browser's cookie database requires **Full Disk Access** for your terminal (System Settings > Privacy & Security > Full Disk Access), plus a Keychain prompt. Browser cookies are encrypted and require permission to read. If you can't grant Full Disk Access, use Option B (manual cookie entry) instead.
 
 **Option B: Manual cookie entry**
 
@@ -187,6 +198,10 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 ```
 
 Restart Claude Desktop. You're ready to go!
+
+### Option C: Hosted (Vercel)
+
+Prefer a remote server you can reach from claude.ai, Claude mobile, ChatGPT, or Grok? Skip the local install and deploy to Vercel instead - see [Hosted deployment (Vercel)](#hosted-deployment-vercel) below.
 
 ---
 
@@ -253,7 +268,7 @@ For advanced round-trip use cases, `tp_create_workout` and `tp_update_workout` a
 }
 ```
 
-Use either `structure` or `structured_workout` in a single create/update call, not both.
+Use either `structure` or `structured_workout` in a single create/update call, not both - passing both raises a validation error. Reach for `structured_workout` when you already have a native TP payload to preserve losslessly (e.g. you called `tp_get_workout` on a workout that returned a `structured_workout` field, edited it, and want to save it back exactly as TrainingPeaks built it). Use the simplified `structure` for everything else, including anything you're building from conversation - it's what `tp_validate_structure` checks, and what auto-computes duration/IF/TSS. `tp_validate_structure` does not validate native `structured_workout` payloads.
 
 For planned workout scheduling, `tp_create_workout` and `tp_update_workout` accept:
 
@@ -265,6 +280,8 @@ TrainingPeaks stores planned workout times separately from the calendar day. Int
 - `workoutDay` stays at midnight for the selected date
 - `startTimePlanned` stores the planned start time
 - planned end time is derived from `startTimePlanned + totalTimePlanned`
+
+**Moving a workout to a new day preserves its time-of-day.** If a workout already has a planned start time and you call `tp_update_workout` with just a bare `YYYY-MM-DD` date (no time), the existing time-of-day carries over to the new date - TrainingPeaks doesn't reset it to midnight. To change both the day and the time in one call, pass the full `YYYY-MM-DDTHH:MM:SS` instead.
 
 Example with a planned start time:
 
@@ -284,7 +301,7 @@ Example with a planned start time:
 
 ## Security
 
-**TL;DR: Your cookie is encrypted on disk, exchanged for short-lived OAuth tokens, never shown to Claude, and only ever sent to TrainingPeaks. The server has no network ports.**
+**TL;DR: Your cookie is encrypted on disk, exchanged for short-lived OAuth tokens, never shown to Claude, and only ever sent to TrainingPeaks. By default the server uses stdio and opens no network ports; an opt-in HTTP transport exists for hosted/remote use and is protected by a required `MCP_AUTH_SECRET`.**
 
 This server is designed with defence-in-depth. Your TrainingPeaks session cookie is sensitive - it grants access to your training data - so we treat it accordingly.
 
@@ -320,9 +337,11 @@ cj = func(domain_name=".trainingpeaks.com")
 
 Claude cannot modify this via tool parameters. The only parameter is `browser` (chrome/firefox/etc), not the domain. To change the domain would require modifying the source code.
 
-### No Network Exposure
+### Network Exposure
 
-The MCP server uses **stdio transport only** - it communicates with Claude Desktop via stdin/stdout, not over the network. There is no HTTP server, no open ports, no remote access.
+By default the MCP server communicates with Claude Desktop over **stdio** (stdin/stdout) with no network exposure - no HTTP server, no open ports, no remote access.
+
+An optional HTTP transport is available for hosted deployments (`tp-mcp serve --transport http`, and the Vercel deployment). It **fails closed**: the app refuses to start unless `MCP_AUTH_SECRET` is set (binding to a non-localhost host without it raises an error). When the secret is set, every request is authenticated with a constant-time comparison (`hmac.compare_digest`) - either via the secret URL path segment `/mcp/<secret>` or an `Authorization: Bearer <secret>` header on bare `/mcp`. When self-hosted, that URL secret is the credential, so treat the endpoint URL like a password and prefer the Bearer header where your client supports it. See the [Hosted deployment](#hosted-deployment-vercel) section for details.
 
 ### Open Source
 
@@ -345,7 +364,49 @@ This means:
 - API calls use proper Bearer token auth, not cookies
 - If your session cookie expires (typically after several weeks), use `tp_refresh_auth` in Claude or run `tp-mcp auth` again
 
+In **hosted (HTTP) mode** the cookie doesn't come from the keyring - it's read from the `TP_AUTH_COOKIE` environment variable and refreshed with `tp-mcp push-cookie` rather than `tp-mcp auth`. See the [Hosted deployment](#hosted-deployment-vercel) section.
+
+## CLI reference
+
+All commands: `tp-mcp <command> [options]`. Run `tp-mcp help` any time for the built-in summary.
+
+| Command | Flags | Description |
+|---|---|---|
+| `auth` | `--from-browser <browser>` | Authenticate with TrainingPeaks. With no flag, prompts for the `Production_tpAuth` cookie manually (hidden input). With `--from-browser`, extracts it from a local browser instead. `<browser>` is one of `chrome`, `firefox`, `safari`, `edge`, `chromium`, `brave`, `opera`, or `auto` (tries all supported browsers in turn). Requires macOS Full Disk Access for the terminal when reading from a browser. |
+| `auth-status` | - | Checks whether a stored cookie exists and is still valid; prints email, athlete ID, and storage backend. Exit code 0 if authenticated, 1 otherwise. |
+| `auth-clear` | - | Deletes the stored credential (keychain or encrypted file). |
+| `config` | - | Prints a ready-to-paste Claude Desktop `mcpServers` JSON snippet pointing at the local `tp-mcp` binary with `args: ["serve"]`. |
+| `serve` | `--transport stdio\|http` (default `stdio`)<br>`--host <host>` (default `127.0.0.1`, http only)<br>`--port <port>` (default `8000`, http only) | Starts the MCP server. `stdio` is the default and matches all prior behavior (what Claude Desktop uses via `config`). `http` starts a Starlette/uvicorn ASGI server exposing streamable-HTTP MCP at `/mcp` and a health check at `/`. The http transport **fails closed**: if `MCP_AUTH_SECRET` is unset and `--host` is anything other than `127.0.0.1`/`localhost`/`::1`, it refuses to start; on localhost with no secret it starts unauthenticated (local dev only) and prints a warning. When `MCP_AUTH_SECRET` is set, requests must include the secret either as the path segment `/mcp/<secret>` or as `Authorization: Bearer <secret>` on bare `/mcp` (compared with `hmac.compare_digest`). |
+| `push-cookie` | `--from-browser <browser>` (default `chrome` if neither source flag given)<br>`--from-stored`<br>`--target <env>` (default `production`) | Extracts a fresh TrainingPeaks cookie and pushes it to Vercel as the `TP_AUTH_COOKIE` env var, then - only when `--target production` - runs `vercel deploy --prod --yes` to bake it into the live deployment. `--from-browser` and `--from-stored` are **mutually exclusive**; `--from-stored` reads the cookie already saved locally via `tp-mcp auth`, avoiding the browser-extraction Full Disk Access requirement entirely. Requires the `vercel` CLI on `PATH`. Validates the cookie before pushing and aborts if it's invalid. |
+| `schedule` | - | Prints (to stdout) a macOS `launchd` plist that runs `tp-mcp push-cookie --from-browser chrome` every Monday at 09:00, plus setup instructions (to stderr). The scheduled job uses browser extraction, so it needs Full Disk Access too. |
+| `help` (also `--help`, `-h`, or no args) | - | Prints command/flag summary and usage examples. |
+
+```bash
+tp-mcp auth                              # Manual cookie entry
+tp-mcp auth --from-browser auto          # Auto-detect browser
+tp-mcp serve                             # stdio (default) - what Claude Desktop uses
+tp-mcp serve --transport http --port 8000
+MCP_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') \
+  tp-mcp serve --transport http --host 0.0.0.0 --port 8000
+tp-mcp push-cookie --from-browser chrome
+tp-mcp push-cookie --from-stored         # no browser access needed
+tp-mcp push-cookie --target preview      # pushes cookie but skips redeploy
+tp-mcp schedule > ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
+launchctl load ~/Library/LaunchAgents/com.trainingpeaks-mcp.refresh.plist
+```
+
 ## Development
+
+The repo ships a committed `uv.lock` that pins dependencies, so [uv](https://docs.astral.sh/uv/) is the recommended dependency manager:
+
+```bash
+uv sync --extra dev
+uv run pytest tests/ -v
+uv run mypy src/
+uv run ruff check src/
+```
+
+The equivalent pip-based flow (matching CI) also works:
 
 ```bash
 pip install -e ".[dev]"
@@ -366,16 +427,21 @@ The setup above runs the server as a local stdio subprocess, so it's only reacha
 
 ### Deploy
 
+Both env vars (`MCP_AUTH_SECRET` and `TP_AUTH_COOKIE`) must exist **before** the first deploy that serves traffic - the app fails closed, so a deploy without `MCP_AUTH_SECRET` returns 500 on every request.
+
 ```bash
 # one-time setup
-vercel link
-python -c 'import secrets; print(secrets.token_urlsafe(32))'   # -> MCP_AUTH_SECRET
-vercel env add MCP_AUTH_SECRET production
-tp-mcp push-cookie --from-browser chrome   # extracts + validates + uploads TP_AUTH_COOKIE
-vercel --prod
+vercel link                                # links this dir to a Vercel project (see GitHub note below)
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'  # -> MCP_AUTH_SECRET
+vercel env add MCP_AUTH_SECRET production  # paste the value from the line above
+tp-mcp push-cookie --from-browser chrome   # extracts + validates + uploads TP_AUTH_COOKIE, then deploys
 ```
 
-Your endpoint is `https://<project>.vercel.app/mcp/<MCP_AUTH_SECRET>`.
+`tp-mcp push-cookie --target production` (the default) already runs `vercel deploy --prod --yes` after uploading the cookie, so that command deploys for you - there is no `vercel redeploy --prod`. If you set the secret but haven't pushed a cookie yet, run one explicit `vercel deploy --prod --yes` for the very first deploy; afterwards `push-cookie` handles it.
+
+> **`vercel link` and GitHub:** `vercel link` offers to connect a GitHub repo. That connection is **optional** - it only enables push-to-deploy, and `vercel deploy --prod` works without it. It also **fails if you lack write access to the repo** (e.g. you cloned someone else's project). If so, either skip it, or fork the repo, authorize the Vercel GitHub App at <https://github.com/settings/installations>, and run `vercel git connect <your-fork-url> --yes`.
+
+Your endpoint is `https://<public-alias>/mcp/<MCP_AUTH_SECRET>`. Vercel mints **several aliases per deployment**, and not all are public: the short project alias (e.g. `https://<project>-<hash>.vercel.app`) is usually public and works, while the team-scoped alias (`https://<project>-<team>.vercel.app`) often sits behind Vercel deployment protection and 302-redirects to an SSO page that silently breaks MCP clients. Find your real public alias with `vercel inspect <deployment-url>` (look at the Aliases list) or `vercel ls`, then verify it (see below). Treat the full URL like a password.
 
 ### Security model
 
@@ -384,6 +450,29 @@ The secret in the URL path acts as a password - it's compared with a constant-ti
 To rotate the secret, set a new `MCP_AUTH_SECRET` env var and redeploy - the old URL stops working immediately.
 
 Note that because the secret lives in the URL, it will appear in Vercel's request logs. This is an accepted tradeoff for a single-user deployment; if that's not acceptable for your use case, use the Bearer header form instead and avoid the path variant.
+
+### Verify your deployment
+
+Before pointing a client at your endpoint, confirm the alias is public and the auth works. Replace `<alias>` with your public alias and `<secret>` with your `MCP_AUTH_SECRET`:
+
+```bash
+# 1. Health check - should be 200 with {"status":"ok","service":"trainingpeaks-mcp"}
+curl https://<alias>/
+
+# 2. Wrong secret - should be 401 {"error":"unauthorized"}
+curl -X POST https://<alias>/mcp/wrong \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 3. Correct secret - should be 200 and list the tools
+curl -X POST https://<alias>/mcp/<secret> \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+If the health check redirects (302) to a Vercel/SSO login page, you're hitting a protected alias - pick the public one from `vercel inspect`/`vercel ls`, or disable deployment protection for the project.
 
 ### Connect your client
 
@@ -394,11 +483,11 @@ Note that because the secret lives in the URL, it will appear in Vercel's reques
 
 ### Refreshing the cookie
 
-TrainingPeaks' login form is protected by reCAPTCHA, so the server can't log itself in - the `Production_tpAuth` cookie has to be minted from a real, already-logged-in browser (or pasted manually) and pushed up. `tp-mcp push-cookie` does the whole thing in one command: it validates the cookie against TrainingPeaks, uploads it as the `TP_AUTH_COOKIE` env var, and redeploys. It supports two sources - pick one:
+TrainingPeaks' login form is protected by reCAPTCHA, so the server can't log itself in - the `Production_tpAuth` cookie has to be minted from a real, already-logged-in browser (or pasted manually) and pushed up. `tp-mcp push-cookie` does the whole thing in one command: it validates the cookie against TrainingPeaks, uploads it as the `TP_AUTH_COOKIE` env var, and (for `--target production`, the default) runs `vercel deploy --prod --yes` to bake it in. Use `--target preview` or `--target development` to push the env var without deploying. It supports two sources - pick one:
 
 ```bash
-tp-mcp push-cookie --from-browser chrome   # extracts from chrome/brave/firefox/safari/edge/auto, validates + uploads
-tp-mcp push-cookie --from-stored           # reuses the cookie already stored by `tp-mcp auth`, validates + uploads
+tp-mcp push-cookie --from-browser chrome   # chrome/firefox/safari/edge/chromium/brave/opera/auto, validates + uploads + deploys
+tp-mcp push-cookie --from-stored           # reuses the cookie already stored by `tp-mcp auth`, validates + uploads + deploys
 ```
 
 **If browser extraction fails**: on macOS, reading a browser's cookie database requires Full Disk Access for your terminal (System Settings > Privacy & Security > Full Disk Access). If you can't or don't want to grant that, run `tp-mcp auth` once to paste the cookie manually, then use `tp-mcp push-cookie --from-stored` instead - no browser access needed.
@@ -427,4 +516,4 @@ Binding to `localhost` works without a secret configured; binding to any non-loc
 - File tools (`tp_download_workout_file`, `tp_analyze_workout` artifacts) write to the function's ephemeral tmp directory, so the paths they return are meaningless to a remote client - prefer base64 upload where the client supports it.
 - Vercel enforces a 4.5 MB request/response body cap.
 - When the cookie expires, tool calls fail with `AUTH_EXPIRED` - just run `tp-mcp push-cookie` again.
-- Preview deployments have Vercel's deployment protection enabled by default, which blocks MCP clients with an SSO page. Use the production deployment, or disable deployment protection for the project.
+- Vercel's deployment protection blocks MCP clients with an SSO page (a 302 redirect). This affects both preview deployments **and** team-scoped production aliases - "use the production deployment" isn't enough on its own if you hit a protected alias. Pick and test your public alias with `vercel inspect`/`vercel ls` (see [Deploy](#deploy) and [Verify your deployment](#verify-your-deployment)), or disable deployment protection for the project.
