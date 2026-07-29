@@ -7,9 +7,86 @@ from typing import Any
 from pydantic import ValidationError
 
 from tp_mcp.client import TPClient
+from tp_mcp.client.context import athlete_override
 from tp_mcp.tools._validation import WorkoutIdInput, format_validation_error
 
 logger = logging.getLogger("tp-mcp")
+
+
+def _step_intensity(step: dict[str, Any]) -> float | None:
+    """The bar height value for a step: the target's maxValue, falling back to
+    minValue when only a floor is set (e.g. `{"minValue": 55}`). None when the
+    step has no numeric target (→ flat bar)."""
+    targets = step.get("targets") or []
+    if not targets:
+        return None
+    t = targets[0]
+    v = t.get("maxValue")
+    if v is None:
+        v = t.get("minValue")
+    return v if isinstance(v, (int, float)) else None
+
+
+def _compute_native_polyline(blocks: list[dict[str, Any]]) -> list[list[float]]:
+    """Rectangular-bar preview polyline from a native structure block list.
+
+    y is NORMALISED so the structure's highest target = 1.0 (HAR-verified
+    against TP's own web-UI preview: e.g. a percentOfFtp item with targets up to
+    102% renders 65% as 0.637 and 90% as 0.882). This relative scaling is
+    intensity-metric AGNOSTIC — it is correct for percentOf* targets AND for
+    absolute watts/pace, whereas a fixed `maxValue / 100` produced 2.5-tall bars
+    for an absolute-watt target and could exceed 1.0 for any >100% step.
+    t is normalised to total length (duration or distance — units cancel);
+    repetition blocks expand into per-rep bars."""
+    # Expand to a flat list of (length, intensity) per step instance.
+    spans: list[tuple[float, float | None]] = []
+    total = 0.0
+    for b in blocks:
+        reps = int(b["length"]["value"]) if b.get("type") == "repetition" else 1
+        for _ in range(reps):
+            for s in b.get("steps", []):
+                ln = s.get("length", {}).get("value", 0) or 0
+                spans.append((ln, _step_intensity(s)))
+                total += ln
+    ymax = max((y for _, y in spans if isinstance(y, (int, float)) and y > 0),
+               default=0.0)
+    if total <= 0 or ymax <= 0:
+        return []
+    poly: list[list[float]] = []
+    pos = 0.0
+    for ln, y in spans:
+        yn = round(y / ymax, 4) if isinstance(y, (int, float)) and y > 0 else 0
+        t0 = pos / total
+        pos += ln
+        t1 = pos / total
+        poly.append([round(t0, 4), 0])
+        poly.append([round(t0, 4), yn])
+        poly.append([round(t1, 4), yn])
+        poly.append([round(t1, 4), 0])
+    return poly
+
+
+def _ensure_structure_preview(structure: Any) -> Any:
+    """Library create/update store the structure as-is and do NOT build the
+    preview fields, so templates saved this way render without a structure
+    thumbnail in TP (HAR-verified: a raw API create without `polyline` reads
+    back with no polyline — TP never backfills it server-side). Backfill the two
+    missing pieces: `primaryIntensityTargetOrRange` and `polyline` (the preview
+    graph). Only touches a native structure (dict with a "structure" block
+    list); anything else is returned untouched. Returns a shallow COPY — the
+    caller's dict is never mutated in place."""
+    if not isinstance(structure, dict):
+        return structure
+    blocks = structure.get("structure")
+    if not isinstance(blocks, list) or not blocks:
+        return structure
+    out = dict(structure)               # copy — do not mutate the caller's dict
+    out.setdefault("primaryIntensityTargetOrRange", "range")
+    if not out.get("polyline"):
+        poly = _compute_native_polyline(blocks)
+        if poly:
+            out["polyline"] = poly
+    return out
 
 
 async def tp_get_libraries() -> dict[str, Any]:
@@ -336,8 +413,9 @@ async def tp_create_library_item(
         if description:
             payload["description"] = description
         if structure is not None:
-            # Library items use nested object, NOT double-serialised string
-            payload["structure"] = structure
+            # Library items use nested object, NOT double-serialised string.
+            # Backfill polyline/range so TP renders the structure preview.
+            payload["structure"] = _ensure_structure_preview(structure)
 
         endpoint = f"/exerciselibrary/v1/libraries/{lib_validated.workout_id}/items"
         response = await client.post(endpoint, json=payload)
@@ -446,7 +524,7 @@ async def tp_update_library_item(
         if description is not None:
             existing["description"] = description
         if structure is not None:
-            existing["structure"] = structure
+            existing["structure"] = _ensure_structure_preview(structure)
         if workout_type_id is not None:
             existing["workoutTypeId"] = workout_type_id
         if workout_sub_type_id is not None:
@@ -471,10 +549,39 @@ async def tp_update_library_item(
         }
 
 
+def _template_workout_payload(
+    item: dict[str, Any], date: str, athlete_id: int
+) -> dict[str, Any]:
+    """Build the planned-workout payload that copies a library template."""
+    sport_id = item.get("workoutTypeId")
+    payload: dict[str, Any] = {
+        "athleteId": athlete_id,
+        "workoutDay": f"{date}T00:00:00",
+        "workoutTypeFamilyId": sport_id,
+        "workoutTypeValueId": sport_id,
+        "title": item.get("itemName"),
+        "totalTimePlanned": item.get("totalTimePlanned"),
+        "tssPlanned": item.get("tssPlanned"),
+        "ifPlanned": item.get("ifPlanned"),
+        "distancePlanned": item.get("distancePlanned"),
+        "elevationGainPlanned": item.get("elevationGainPlanned"),
+        "caloriesPlanned": item.get("caloriesPlanned"),
+        "description": item.get("description"),
+        "coachComments": item.get("coachComments"),
+    }
+    if item.get("workoutSubTypeId") is not None:
+        payload["workoutSubTypeId"] = item["workoutSubTypeId"]
+    if item.get("structure"):
+        # Calendar workouts carry structure as a JSON string
+        payload["structure"] = json.dumps(item["structure"])
+    return payload
+
+
 async def tp_schedule_library_workout(
     library_id: str,
     item_id: str,
     date: str,
+    athletes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Schedule a library template to a calendar date.
 
@@ -488,9 +595,14 @@ async def tp_schedule_library_workout(
         library_id: Library ID.
         item_id: Library item ID.
         date: Target date (YYYY-MM-DD).
+        athletes: Optional list of athlete names or IDs (coach accounts) to
+            schedule the same template to several athletes in one call.
+            Mutually exclusive with the ``athlete`` targeting parameter.
 
     Returns:
-        Dict with confirmation (including new workout_id) or error.
+        Dict with confirmation (including new workout_id) or error. In bulk
+        mode, a ``scheduled`` list plus per-athlete ``errors``; ``isError``
+        is set only when EVERY athlete failed.
     """
     try:
         lib_validated = WorkoutIdInput(workout_id=library_id)
@@ -514,14 +626,37 @@ async def tp_schedule_library_workout(
             "message": f"Invalid date: {date}",
         }
 
-    async with TPClient() as client:
-        athlete_id = await client.ensure_athlete_id()
-        if not athlete_id:
+    if athletes is not None:
+        if athlete_override.get() is not None:
             return {
                 "isError": True,
-                "error_code": "AUTH_INVALID",
-                "message": "Could not get athlete ID. Re-authenticate.",
+                "error_code": "VALIDATION_ERROR",
+                "message": (
+                    "Pass either 'athlete' (single target) or 'athletes' "
+                    "(bulk), not both."
+                ),
             }
+        if (
+            not isinstance(athletes, (list, tuple))
+            or not athletes
+            or not all(isinstance(a, (str, int)) and str(a).strip() for a in athletes)
+        ):
+            return {
+                "isError": True,
+                "error_code": "VALIDATION_ERROR",
+                "message": "athletes must be a non-empty list of athlete names or IDs.",
+            }
+
+    async with TPClient() as client:
+        athlete_id: int | None = None
+        if athletes is None:
+            athlete_id = await client.ensure_athlete_id()
+            if not athlete_id:
+                return {
+                    "isError": True,
+                    "error_code": "AUTH_INVALID",
+                    "message": "Could not get athlete ID. Re-authenticate.",
+                }
 
         # Fetch the template to copy
         items_endpoint = f"/exerciselibrary/v2/libraries/{lib_validated.workout_id}/items"
@@ -555,30 +690,14 @@ async def tp_schedule_library_workout(
                 ),
             }
 
-        sport_id = item.get("workoutTypeId")
-        payload: dict[str, Any] = {
-            "athleteId": athlete_id,
-            "workoutDay": f"{date}T00:00:00",
-            "workoutTypeFamilyId": sport_id,
-            "workoutTypeValueId": sport_id,
-            "title": item.get("itemName"),
-            "totalTimePlanned": item.get("totalTimePlanned"),
-            "tssPlanned": item.get("tssPlanned"),
-            "ifPlanned": item.get("ifPlanned"),
-            "distancePlanned": item.get("distancePlanned"),
-            "elevationGainPlanned": item.get("elevationGainPlanned"),
-            "caloriesPlanned": item.get("caloriesPlanned"),
-            "description": item.get("description"),
-            "coachComments": item.get("coachComments"),
-        }
-        if item.get("workoutSubTypeId") is not None:
-            payload["workoutSubTypeId"] = item["workoutSubTypeId"]
-        if item.get("structure"):
-            # Calendar workouts carry structure as a JSON string
-            payload["structure"] = json.dumps(item["structure"])
+        if athletes is not None:
+            return await _schedule_item_bulk(client, item, date, athletes)
 
+        assert athlete_id is not None  # resolved above in the single-athlete path
         endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts"
-        response = await client.post(endpoint, json=payload)
+        response = await client.post(
+            endpoint, json=_template_workout_payload(item, date, athlete_id)
+        )
 
         if response.is_error:
             return {
@@ -598,3 +717,74 @@ async def tp_schedule_library_workout(
             "workout_id": workout_id,
             "title": item.get("itemName"),
         }
+
+
+async def _schedule_item_bulk(
+    client: TPClient, item: dict[str, Any], date: str, athletes: list[str]
+) -> dict[str, Any]:
+    """Schedule one library template to several athletes, sequentially.
+
+    Each entry is resolved exactly as the single ``athlete`` targeting
+    parameter would be (name or ID, via the athlete_override context var).
+    Follows the groups-tools partial-failure pattern: per-athlete ``errors``,
+    ``isError`` only when EVERY athlete failed.
+    """
+    scheduled: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for entry in athletes:
+        target = str(entry).strip()
+        token = athlete_override.set(target)
+        try:
+            athlete_id = await client.ensure_athlete_id()
+        except ValueError as e:
+            # Ambiguous athlete name — ensure_athlete_id lists the matches.
+            errors.append({"athlete": target, "message": str(e)})
+            continue
+        finally:
+            athlete_override.reset(token)
+
+        if not athlete_id:
+            errors.append({
+                "athlete": target,
+                "message": f"Could not resolve athlete {target!r} in your roster.",
+            })
+            continue
+
+        endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts"
+        response = await client.post(
+            endpoint, json=_template_workout_payload(item, date, athlete_id)
+        )
+        if response.is_error:
+            errors.append({
+                "athlete": target,
+                "athlete_id": athlete_id,
+                "message": response.message,
+            })
+        else:
+            workout_id = None
+            if isinstance(response.data, dict):
+                workout_id = response.data.get("workoutId")
+            scheduled.append({
+                "athlete": target,
+                "athlete_id": athlete_id,
+                "workout_id": workout_id,
+            })
+
+    result: dict[str, Any] = {
+        "date": date,
+        "title": item.get("itemName"),
+        "scheduled": scheduled,
+        "errors": errors,
+        "message": (
+            f"Scheduled for {len(scheduled)} of {len(athletes)} athlete(s) on {date}."
+        ),
+    }
+    if errors and not scheduled:
+        result["isError"] = True
+        result["error_code"] = "API_ERROR"
+        result["message"] = (
+            f"None of the {len(errors)} athlete(s) could be scheduled; "
+            "see errors for per-athlete detail."
+        )
+    return result
