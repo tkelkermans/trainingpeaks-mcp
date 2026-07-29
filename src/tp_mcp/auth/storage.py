@@ -1,7 +1,9 @@
 """Unified credential storage with automatic backend selection.
 
 Uses system keyring when available, falls back to encrypted file storage.
-Environment variable override is also supported for CI/testing.
+The TP_AUTH_COOKIE environment variable is a supported first-class auth
+source for headless servers, containers, and CI, and takes precedence
+over both stored backends.
 """
 
 import os
@@ -48,14 +50,22 @@ def store_credential(cookie: str) -> CredentialResult:
     # Always store in encrypted file first (reliable fallback)
     encrypted_result = store_credential_encrypted(cookie)
 
-    # Also try keyring if available (may fail due to app permissions)
+    # Also try keyring if available (may fail due to app permissions on macOS,
+    # or the Windows Credential Manager blob-size limit for large cookies).
     if is_keyring_available():
-        keyring_result = store_credential_keyring(cookie)
-        if keyring_result.success:
-            return CredentialResult(
-                success=True,
-                message="Credential stored in keyring and encrypted file",
-            )
+        try:
+            keyring_result = store_credential_keyring(cookie)
+            if keyring_result.success:
+                return CredentialResult(
+                    success=True,
+                    message="Credential stored in keyring and encrypted file",
+                )
+        except Exception:
+            # Keyring write raised (e.g. WinError 1783 "The stub received bad
+            # data" when the cookie exceeds the Windows Credential Manager
+            # blob-size limit). The encrypted file write above already
+            # succeeded, so fall back to it instead of crashing.
+            pass
 
     return encrypted_result
 
@@ -64,14 +74,16 @@ def get_credential() -> CredentialResult:
     """Retrieve the TrainingPeaks auth cookie.
 
     Checks in order:
-    1. Environment variable (for CI/testing)
+    1. TP_AUTH_COOKIE environment variable (supported auth method for
+       headless servers, containers, and CI)
     2. System keyring
     3. Encrypted file
 
     Returns:
         CredentialResult with cookie if found.
     """
-    # Check environment variable first (CI/testing override)
+    # Check environment variable first (supported headless/container/CI
+    # auth path; takes precedence over stored credentials)
     env_cookie = os.environ.get(ENV_VAR_NAME)
     if env_cookie:
         return CredentialResult(
