@@ -61,6 +61,59 @@ def _save_workout_file(workout_id: str, file_id: str, filename: str, data: bytes
     return str(path.resolve())
 
 
+async def _fetch_workout_file_bytes(
+    workout_id: str,
+    file_id: str,
+) -> tuple[bytes | None, dict[str, Any]]:
+    """Fetch authenticated workout-file bytes without touching the filesystem."""
+    if not _is_numeric_id(workout_id):
+        return None, {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": "workout_id must be a numeric ID.",
+        }
+    if not _is_numeric_id(file_id, allow_negative=True):
+        return None, {
+            "isError": True,
+            "error_code": "VALIDATION_ERROR",
+            "message": "file_id must be a numeric ID (can be negative).",
+        }
+
+    async with TPClient() as client:
+        athlete_id = await client.ensure_athlete_id()
+        if not athlete_id:
+            return None, {
+                "isError": True,
+                "error_code": "AUTH_INVALID",
+                "message": "Could not get athlete ID. Re-authenticate.",
+            }
+
+        endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts/{workout_id}/rawfiledata/{file_id}"
+        response = await client.get_raw(endpoint)
+
+    if response.is_error:
+        if response.error_code is not None and response.error_code.value == "NOT_FOUND":
+            return None, {
+                "isError": True,
+                "error_code": "NOT_FOUND",
+                "message": f"Workout file {file_id} not found.",
+            }
+        return None, {
+            "isError": True,
+            "error_code": response.error_code.value if response.error_code else "API_ERROR",
+            "message": response.message,
+        }
+
+    content = response.content
+    return content, {
+        "workout_id": workout_id,
+        "file_id": file_id,
+        "file_name": _parse_content_disposition_filename(response.content_disposition),
+        "content_type": response.content_type,
+        "size_bytes": len(content),
+    }
+
+
 async def tp_upload_workout_file(
     workout_id: str,
     file_path: str | None = None,
@@ -200,65 +253,34 @@ async def tp_download_workout_file(
     Returns:
         Dict with file info and saved path, or error.
     """
-    if not _is_numeric_id(workout_id):
-        return {"isError": True, "error_code": "VALIDATION_ERROR", "message": "workout_id must be a numeric ID."}
-    if not _is_numeric_id(file_id, allow_negative=True):
-        return {
-            "isError": True,
-            "error_code": "VALIDATION_ERROR",
-            "message": "file_id must be a numeric ID (can be negative).",
-        }
+    content, result = await _fetch_workout_file_bytes(workout_id, file_id)
+    if content is None:
+        return result
 
-    async with TPClient() as client:
-        athlete_id = await client.ensure_athlete_id()
-        if not athlete_id:
-            return {
-                "isError": True,
-                "error_code": "AUTH_INVALID",
-                "message": "Could not get athlete ID. Re-authenticate.",
-            }
-
-        endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts/{workout_id}/rawfiledata/{file_id}"
-        response = await client.get_raw(endpoint)
-
-        if response.is_error:
-            if response.error_code is not None and response.error_code.value == "NOT_FOUND":
-                return {"isError": True, "error_code": "NOT_FOUND", "message": f"Workout file {file_id} not found."}
-            return {
-                "isError": True,
-                "error_code": response.error_code.value if response.error_code else "API_ERROR",
-                "message": response.message,
-            }
-
-        filename = _parse_content_disposition_filename(response.content_disposition)
-        content = response.content
-        if output_path:
-            target = Path(output_path)
-            if target.exists() and target.is_dir():
-                save_name = filename or f"workout_{workout_id}_file_{file_id}.fit.gz"
-                file_out = (target / Path(save_name).name).resolve()
-            else:
-                file_out = target.resolve()
-            file_out.parent.mkdir(parents=True, exist_ok=True)
-            file_out.write_bytes(content)
-            saved_to = str(file_out)
+    filename = result.get("file_name")
+    if output_path:
+        target = Path(output_path)
+        if target.exists() and target.is_dir():
+            save_name = filename or f"workout_{workout_id}_file_{file_id}.fit.gz"
+            file_out = (target / Path(save_name).name).resolve()
         else:
-            saved_to = _save_workout_file(
-                workout_id=workout_id,
-                file_id=file_id,
-                filename=filename or "",
-                data=content,
-            )
+            file_out = target.resolve()
+        file_out.parent.mkdir(parents=True, exist_ok=True)
+        file_out.write_bytes(content)
+        saved_to = str(file_out)
+    else:
+        saved_to = _save_workout_file(
+            workout_id=workout_id,
+            file_id=file_id,
+            filename=str(filename or ""),
+            data=content,
+        )
 
-        return {
-            "workout_id": workout_id,
-            "file_id": file_id,
-            "file_name": filename,
-            "content_type": response.content_type,
-            "size_bytes": len(content),
-            "saved_to": saved_to,
-            "message": "Workout file downloaded successfully.",
-        }
+    return {
+        **result,
+        "saved_to": saved_to,
+        "message": "Workout file downloaded successfully.",
+    }
 
 
 async def tp_delete_workout_file(workout_id: str, file_id: str) -> dict[str, Any]:

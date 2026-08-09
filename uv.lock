@@ -258,6 +258,15 @@ wheels = [
 ]
 
 [[package]]
+name = "garmin-fit-sdk"
+version = "21.212.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/b2/ffd32e045632fb7f75ed25a86520c3e06668f46feb9ab81df0de9bbc1e99/garmin_fit_sdk-21.212.0.tar.gz", hash = "sha256:91f22f731c00a9cdf5a787a3f8345d89c588ce995b89f9f84505540a07054526", size = 198897, upload-time = "2026-08-04T17:23:35.084Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/6c/10331cc1e528da3de4240c85bc4cf19dd40194fa815c9b5ef21068db39b2/garmin_fit_sdk-21.212.0-py3-none-any.whl", hash = "sha256:74ecf6b403df764132faad821258dc7fe2a3ddb831cc7dcc1fb0690b1a67379b", size = 219246, upload-time = "2026-08-04T17:23:33.532Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1250,6 +1259,7 @@ version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+    { name = "garmin-fit-sdk" },
     { name = "httpx" },
     { name = "keyring" },
     { name = "mcp" },
@@ -1273,6 +1283,7 @@ dev = [
 requires-dist = [
     { name = "browser-cookie3", marker = "extra == 'browser'", specifier = ">=0.19.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
+    { name = "garmin-fit-sdk", specifier = "==21.212.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "keyring", specifier = ">=25.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
