@@ -232,6 +232,15 @@ class TestListTools:
             "default": "auto",
         }
 
+    @pytest.mark.asyncio
+    async def test_classifier_description_lists_all_relationship_outcomes(self):
+        tools = {tool.name: tool for tool in await list_tools()}
+        description = tools["tp_classify_sessions"].description
+
+        assert "same_session" in description
+        assert "distinct" in description
+        assert "unresolved" in description
+
     def test_complete_analysis_tools_are_exported(self):
         expected = {
             "tp_classify_sessions",

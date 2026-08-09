@@ -582,8 +582,9 @@ TOOLS = [
     Tool(
         name="tp_classify_sessions",
         description=(
-            "Classify two to twenty workout records as copies or distinct sessions "
-            "and select once-only canonical metrics without mutation."
+            "Classify the relationship among two to twenty workout records as "
+            "same_session, distinct, or unresolved, then select once-only "
+            "canonical metrics without mutation."
         ),
         inputSchema={
             "type": "object",
