@@ -126,6 +126,15 @@ async def test_filters_channels_and_reports_units_provenance_and_availability():
             "unit": "watts",
             "source": "trainingpeaks_analysis",
             "available": True,
+            "availability": {
+                "state": "available",
+                "reason": None,
+                "source": "trainingpeaks_analysis",
+            },
+            "provenance": {
+                "source": "trainingpeaks_analysis",
+                "workout_id": WORKOUT_ID,
+            },
         }
     ]
     assert result["availability"] == {
@@ -158,6 +167,55 @@ async def test_redacts_location_by_default_from_samples_inventory_and_units():
 
 
 @pytest.mark.asyncio
+async def test_redacts_coordinate_like_channel_name_variants():
+    coordinate_names = [
+        "gps_lat",
+        "gps_lon",
+        "start_position_lat",
+        "end_position_long",
+        "position_lat",
+        "position_long",
+        "latitude",
+        "longitude",
+    ]
+    samples = [
+        {
+            "time": 0,
+            "Power": 150,
+            **{name: index for index, name in enumerate(coordinate_names)},
+        }
+    ]
+    response = _analysis_response(samples)
+    response["dataElements"].extend(
+        {
+            "identifier": name,
+            "name": name,
+            "unit": "degrees",
+        }
+        for name in coordinate_names
+    )
+    tool = getattr(analyze, "tp_get_workout_timeseries", None)
+    assert tool is not None
+
+    with patch(
+        "tp_mcp.tools.analyze._fetch_workout_analysis",
+        new=AsyncMock(return_value=(WORKOUT_ID, response)),
+    ):
+        result = await tool(str(WORKOUT_ID))
+
+    assert result["samples"] == [{"elapsed_seconds": 0, "Power": 150}]
+    assert set(result["privacy"]["redacted_fields"]) == {
+        "Latitude",
+        "Longitude",
+        *coordinate_names,
+    }
+    assert not set(coordinate_names) & set(result["units"])
+    assert not set(coordinate_names) & {
+        channel["identifier"] for channel in result["channels"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_includes_location_only_with_explicit_opt_in():
     result = await _call_timeseries(include_location=True)
 
@@ -181,6 +239,90 @@ async def test_rejects_out_of_bounds_page_inputs(offset: int, limit: int):
 
     assert result["isError"] is True
     assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["availability"] == {
+        "state": "unavailable",
+        "reason": "validation_error",
+        "source": "trainingpeaks_analysis",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tags_invalid_workout_id_as_validation_unavailable():
+    result = await analyze.tp_get_workout_timeseries("not-a-workout-id")
+
+    assert result["isError"] is True
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["availability"] == {
+        "state": "unavailable",
+        "reason": "validation_error",
+        "source": "trainingpeaks_analysis",
+    }
+
+
+@pytest.mark.asyncio
+async def test_reports_missing_requested_channel_with_stable_reason():
+    result = await _call_timeseries(channels=["Cadence"])
+
+    assert result["availability"] == {
+        "state": "partial",
+        "reason": "requested_channels_unavailable",
+        "source": "trainingpeaks_analysis",
+    }
+    assert result["unavailable_channels"] == ["Cadence"]
+    assert result["channels"] == [
+        {
+            "identifier": "Cadence",
+            "requested_name": "Cadence",
+            "name": "Cadence",
+            "unit": None,
+            "source": "trainingpeaks_analysis",
+            "available": False,
+            "availability": {
+                "state": "unavailable",
+                "reason": "channel_not_available",
+                "source": "trainingpeaks_analysis",
+            },
+            "provenance": {
+                "source": "trainingpeaks_analysis",
+                "workout_id": WORKOUT_ID,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_elapsed_seconds_filter_keeps_mandatory_channel_metadata():
+    result = await _call_timeseries(channels=["elapsed_seconds"])
+
+    assert result["samples"] == [
+        {"elapsed_seconds": 0},
+        {"elapsed_seconds": 4},
+        {"elapsed_seconds": 8},
+    ]
+    assert result["units"] == {"elapsed_seconds": "s"}
+    assert result["channels"] == [
+        {
+            "identifier": "elapsed_seconds",
+            "name": "Elapsed time",
+            "unit": "s",
+            "source": "trainingpeaks_analysis",
+            "available": True,
+            "availability": {
+                "state": "available",
+                "reason": None,
+                "source": "trainingpeaks_analysis",
+            },
+            "provenance": {
+                "source": "trainingpeaks_analysis",
+                "workout_id": WORKOUT_ID,
+            },
+        }
+    ]
+    assert result["availability"] == {
+        "state": "available",
+        "reason": None,
+        "source": "trainingpeaks_analysis",
+    }
 
 
 @pytest.mark.asyncio
@@ -226,4 +368,35 @@ async def test_preserves_analysis_fetch_errors():
     ):
         result = await tool(str(WORKOUT_ID))
 
-    assert result == error
+    assert result == {
+        **error,
+        "availability": {
+            "state": "unavailable",
+            "reason": "analysis_fetch_error",
+            "source": "trainingpeaks_analysis",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_tags_analysis_parse_errors_as_unavailable():
+    tool = getattr(analyze, "tp_get_workout_timeseries", None)
+    assert tool is not None
+    malformed = {**_analysis_response(), "workoutId": "not-an-integer"}
+
+    with patch(
+        "tp_mcp.tools.analyze._fetch_workout_analysis",
+        new=AsyncMock(return_value=(WORKOUT_ID, malformed)),
+    ):
+        result = await tool(str(WORKOUT_ID))
+
+    assert result == {
+        "isError": True,
+        "error_code": "API_ERROR",
+        "message": "Failed to parse workout analysis.",
+        "availability": {
+            "state": "unavailable",
+            "reason": "analysis_parse_error",
+            "source": "trainingpeaks_analysis",
+        },
+    }

@@ -13,12 +13,15 @@ from tp_mcp.tools.analysis_contract import (
     MAX_PAGE_LIMIT,
     TimeSeriesPageInput,
     build_timeseries_page,
+    is_location_field,
+    tag_unavailable,
 )
 
 logger = logging.getLogger("tp-mcp")
 
 ANALYSIS_API_BASE = "https://api.peakswaresb.com"
 ANALYSIS_TIMEOUT = 60.0
+ANALYSIS_SOURCE = "trainingpeaks_analysis"
 
 
 async def _fetch_workout_analysis(
@@ -161,6 +164,8 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
             if v is not None
         }
         for ch in analysis.data_elements
+        if not is_location_field(ch.identifier or "")
+        and not is_location_field(ch.name or "")
     ]
 
     return {
@@ -199,25 +204,41 @@ async def tp_get_workout_timeseries(
         )
     except (ValidationError, ValueError) as e:
         msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
-        return {
-            "isError": True,
-            "error_code": "VALIDATION_ERROR",
-            "message": msg,
-        }
+        return tag_unavailable(
+            {
+                "isError": True,
+                "error_code": "VALIDATION_ERROR",
+                "message": msg,
+            },
+            reason="validation_error",
+            source=ANALYSIS_SOURCE,
+        )
 
     wid, raw_data = await _fetch_workout_analysis(workout_id)
     if wid is None:
-        return raw_data
+        return tag_unavailable(
+            raw_data,
+            reason=(
+                "validation_error"
+                if raw_data.get("error_code") == "VALIDATION_ERROR"
+                else "analysis_fetch_error"
+            ),
+            source=ANALYSIS_SOURCE,
+        )
 
     try:
         analysis = parse_workout_analysis(raw_data)
     except Exception:
         logger.exception("Failed to parse workout analysis")
-        return {
-            "isError": True,
-            "error_code": "API_ERROR",
-            "message": "Failed to parse workout analysis.",
-        }
+        return tag_unavailable(
+            {
+                "isError": True,
+                "error_code": "API_ERROR",
+                "message": "Failed to parse workout analysis.",
+            },
+            reason="analysis_parse_error",
+            source=ANALYSIS_SOURCE,
+        )
 
     channel_metadata = [
         {
@@ -237,5 +258,5 @@ async def tp_get_workout_timeseries(
         limit=page_input.limit,
         requested_channels=page_input.channels,
         include_location=page_input.include_location,
-        source="trainingpeaks_analysis",
+        source=ANALYSIS_SOURCE,
     )

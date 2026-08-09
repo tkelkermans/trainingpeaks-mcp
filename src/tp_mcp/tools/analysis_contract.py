@@ -21,6 +21,16 @@ _LOCATION_NAMES = {
     "positionlat",
     "positionlong",
 }
+_LOCATION_SUFFIXES = (
+    "gpslat",
+    "gpslon",
+    "gpslong",
+    "gpslng",
+    "positionlat",
+    "positionlon",
+    "positionlong",
+    "positionlng",
+)
 _TIMEZONE_SUFFIX = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
 
 
@@ -54,7 +64,25 @@ def is_location_field(name: str) -> bool:
         normalized in _LOCATION_NAMES
         or "latitude" in normalized
         or "longitude" in normalized
+        or normalized.endswith(_LOCATION_SUFFIXES)
     )
+
+
+def tag_unavailable(
+    response: Mapping[str, Any],
+    *,
+    reason: str,
+    source: str,
+) -> dict[str, Any]:
+    """Add stable source availability while retaining an existing error response."""
+    return {
+        **response,
+        "availability": {
+            "state": "unavailable",
+            "reason": reason,
+            "source": source,
+        },
+    }
 
 
 def _source_timezone(*timestamps: str | None) -> str | None:
@@ -106,12 +134,17 @@ def build_timeseries_page(
         for field in source_channel_order
         if include_location or not is_location_field(field)
     ]
+    elapsed_requested = (
+        requested_channels is not None
+        and ELAPSED_TIME_FIELD in requested_channels
+    )
     if requested_channels is None:
         selected_channels = allowed_source_channels
     else:
         selected_channels = [
             field
             for field in requested_channels
+            if field != ELAPSED_TIME_FIELD
             if include_location or not is_location_field(field)
         ]
 
@@ -133,19 +166,48 @@ def build_timeseries_page(
     inventory: list[dict[str, Any]] = []
     units: dict[str, str | None] = {ELAPSED_TIME_FIELD: ELAPSED_TIME_UNIT}
     unavailable_channels: list[str] = []
+    if elapsed_requested:
+        inventory.append(
+            {
+                "identifier": ELAPSED_TIME_FIELD,
+                "name": "Elapsed time",
+                "unit": ELAPSED_TIME_UNIT,
+                "source": source,
+                "available": True,
+                "availability": {
+                    "state": "available",
+                    "reason": None,
+                    "source": source,
+                },
+                "provenance": {
+                    "source": source,
+                    "workout_id": workout_id,
+                },
+            }
+        )
     for identifier in selected_channels:
         metadata = metadata_by_identifier.get(identifier, {})
         available = identifier in source_channel_order
         unit = metadata.get("unit")
-        inventory.append(
-            {
-                "identifier": identifier,
-                "name": metadata.get("name") or identifier,
-                "unit": unit,
+        channel_entry = {
+            "identifier": identifier,
+            "name": metadata.get("name") or identifier,
+            "unit": unit,
+            "source": source,
+            "available": available,
+            "availability": {
+                "state": "available" if available else "unavailable",
+                "reason": None if available else "channel_not_available",
                 "source": source,
-                "available": available,
-            }
-        )
+            },
+            "provenance": {
+                "source": source,
+                "workout_id": workout_id,
+            },
+        }
+        if not available:
+            channel_entry["requested_name"] = identifier
+        inventory.append(channel_entry)
         units[identifier] = unit
         if not available:
             unavailable_channels.append(identifier)
@@ -154,9 +216,7 @@ def build_timeseries_page(
     has_more = offset + returned < total
     if unavailable_channels:
         availability_state = "partial"
-        availability_reason = (
-            "requested_channels_unavailable: " + ", ".join(unavailable_channels)
-        )
+        availability_reason = "requested_channels_unavailable"
     elif total == 0:
         availability_state = "available"
         availability_reason = "source_returned_no_samples"
@@ -187,6 +247,7 @@ def build_timeseries_page(
             "reason": availability_reason,
             "source": source,
         },
+        "unavailable_channels": unavailable_channels,
         "provenance": {
             "source": source,
             "workout_id": workout_id,

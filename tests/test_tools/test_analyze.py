@@ -193,6 +193,42 @@ class TestTpAnalyzeWorkout:
         }
 
     @pytest.mark.asyncio
+    async def test_omits_all_location_channel_summaries(self):
+        analysis_data = _sample_analysis_response()
+        coordinate_names = [
+            "gps_lat",
+            "gps_lon",
+            "start_position_lat",
+            "end_position_long",
+            "position_lat",
+            "position_long",
+            "latitude",
+            "longitude",
+        ]
+        analysis_data["dataElements"].extend(
+            {
+                "identifier": name,
+                "name": name,
+                "unit": "degrees",
+                "min": 7.0,
+                "max": 46.0,
+                "average": 20.0,
+            }
+            for name in coordinate_names
+        )
+
+        with patch(
+            "tp_mcp.tools.analyze._fetch_workout_analysis",
+            new=AsyncMock(return_value=(3553733903, analysis_data)),
+        ):
+            result = await tp_analyze_workout("3553733903")
+
+        returned_identifiers = {
+            channel["identifier"] for channel in result["dataChannels"]
+        }
+        assert returned_identifiers == {"Power", "HeartRate"}
+
+    @pytest.mark.asyncio
     async def test_401_expired_auth(self):
         mock_client = _mock_tp_client()
 
