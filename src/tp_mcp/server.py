@@ -20,6 +20,7 @@ from tp_mcp.tools import (
     tp_add_workout_comment,
     tp_analyze_workout,
     tp_auth_status,
+    tp_classify_sessions,
     tp_copy_workout,
     tp_create_availability,
     tp_create_equipment,
@@ -57,8 +58,10 @@ from tp_mcp.tools import (
     tp_get_weekly_summary,
     tp_get_workout,
     tp_get_workout_comments,
+    tp_get_workout_file_timeseries,
     tp_get_workout_note,
     tp_get_workout_prs,
+    tp_get_workout_timeseries,
     tp_get_workout_types,
     tp_get_workouts,
     tp_list_athletes,
@@ -131,6 +134,53 @@ RAW_STRUCTURE_DESCRIPTION = (
 )
 WORKOUT_FEELING_DESCRIPTION = "TrainingPeaks feeling value (0-10)."
 WORKOUT_RPE_DESCRIPTION = "Rating of perceived exertion (RPE), 0-10."
+
+_WORKOUT_ID_SCHEMA = {
+    "type": "string",
+    "pattern": "^[1-9][0-9]{0,19}$",
+    "minLength": 1,
+    "maxLength": 20,
+    "description": "Positive TrainingPeaks workout ID, up to 20 ASCII digits.",
+}
+_FILE_ID_SCHEMA = {
+    "type": "string",
+    "pattern": "^-?[0-9]{1,20}$",
+    "minLength": 1,
+    "maxLength": 21,
+    "description": "TrainingPeaks workout file ID, with an optional leading minus sign.",
+}
+_TIMESERIES_PAGE_PROPERTIES = {
+    "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 0,
+        "description": "Zero-based sample offset.",
+    },
+    "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "default": 500,
+        "description": "Maximum samples to return (1-1000).",
+    },
+    "channels": {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": r"^(?=.*\S).+$",
+        },
+        "maxItems": 100,
+        "uniqueItems": True,
+        "description": "Optional source channel identifiers to include.",
+    },
+    "include_location": {
+        "type": "boolean",
+        "default": False,
+        "description": "Include coordinate channels. Defaults to false for privacy.",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +480,23 @@ TOOLS = [
         },
     ),
     Tool(
+        name="tp_get_workout_file_timeseries",
+        description=(
+            "Fetch and decode a workout FIT file in memory with bounded pagination. "
+            "Coordinates are omitted unless include_location is true."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workout_id": _WORKOUT_ID_SCHEMA,
+                "file_id": _FILE_ID_SCHEMA,
+                **_TIMESERIES_PAGE_PROPERTIES,
+            },
+            "required": ["workout_id", "file_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="tp_delete_workout_file",
         description="Delete a workout file by file_id. Get file_id from tp_get_workout device_files/attachment_files.",
         inputSchema={
@@ -486,11 +553,65 @@ TOOLS = [
     ),
     Tool(
         name="tp_analyze_workout",
-        description="Get workout analysis: metrics, zones, laps. Saves full time-series to JSON file.",
+        description=(
+            "Get workout analysis metrics, zones, laps, and in-memory time-series "
+            "access metadata."
+        ),
         inputSchema={
             "type": "object",
             "properties": {"workout_id": {"type": "string"}},
             "required": ["workout_id"],
+        },
+    ),
+    Tool(
+        name="tp_get_workout_timeseries",
+        description=(
+            "Get a paginated TrainingPeaks analysis time series in memory. "
+            "Coordinates are omitted unless include_location is true."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workout_id": _WORKOUT_ID_SCHEMA,
+                **_TIMESERIES_PAGE_PROPERTIES,
+            },
+            "required": ["workout_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="tp_classify_sessions",
+        description=(
+            "Classify two to twenty workout records as copies or distinct sessions "
+            "and select once-only canonical metrics without mutation."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workout_ids": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            _WORKOUT_ID_SCHEMA,
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 99999999999999999999,
+                            },
+                        ],
+                    },
+                    "minItems": 2,
+                    "maxItems": 20,
+                    "uniqueItems": True,
+                },
+                "preference": {
+                    "type": "string",
+                    "enum": ["auto", "trainingpeaks_virtual", "garmin"],
+                    "default": "auto",
+                },
+            },
+            "required": ["workout_ids"],
+            "additionalProperties": False,
         },
     ),
     # --- Fitness & Summary ---
@@ -1160,6 +1281,17 @@ async def _h_download_workout_file(args):
         output_path=args.get("output_path"),
     )
 
+@_handler("tp_get_workout_file_timeseries")
+async def _h_get_workout_file_timeseries(args):
+    return await tp_get_workout_file_timeseries(
+        workout_id=args["workout_id"],
+        file_id=args["file_id"],
+        offset=args.get("offset", 0),
+        limit=args.get("limit", 500),
+        channels=args.get("channels"),
+        include_location=args.get("include_location", False),
+    )
+
 @_handler("tp_delete_workout_file")
 async def _h_delete_workout_file(args):
     return await tp_delete_workout_file(
@@ -1180,6 +1312,23 @@ async def _h_get_peaks(args):
 
 @_handler("tp_analyze_workout")
 async def _h_analyze(args): return await tp_analyze_workout(workout_id=args["workout_id"])
+
+@_handler("tp_get_workout_timeseries")
+async def _h_get_workout_timeseries(args):
+    return await tp_get_workout_timeseries(
+        workout_id=args["workout_id"],
+        offset=args.get("offset", 0),
+        limit=args.get("limit", 500),
+        channels=args.get("channels"),
+        include_location=args.get("include_location", False),
+    )
+
+@_handler("tp_classify_sessions")
+async def _h_classify_sessions(args):
+    return await tp_classify_sessions(
+        workout_ids=args["workout_ids"],
+        preference=args.get("preference", "auto"),
+    )
 
 # --- Fitness & Summary ---
 @_handler("tp_get_fitness")

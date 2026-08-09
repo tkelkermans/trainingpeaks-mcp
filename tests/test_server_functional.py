@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import tp_mcp.tools as tool_exports
 from tp_mcp.client.http import APIResponse
 from tp_mcp.server import call_tool, list_tools
 
@@ -104,8 +105,141 @@ class TestListTools:
             "tp_set_workout_note",
             "tp_get_workout_note",
         }
+        complete_analysis_tools = {
+            "tp_classify_sessions",
+            "tp_get_workout_file_timeseries",
+            "tp_get_workout_timeseries",
+        }
         assert v2_tools.issubset(names)
-        assert len(names) == len(core_tools) + len(v2_tools)
+        assert complete_analysis_tools.issubset(names)
+        assert len(names) == len(core_tools) + len(v2_tools) + len(complete_analysis_tools)
+
+    @pytest.mark.asyncio
+    async def test_complete_analysis_tool_schemas_are_bounded(self):
+        tools = {tool.name: tool for tool in await list_tools()}
+
+        workout_id_schema = {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "minLength": 1,
+            "maxLength": 20,
+            "description": "Positive TrainingPeaks workout ID, up to 20 ASCII digits.",
+        }
+        file_id_schema = {
+            "type": "string",
+            "pattern": "^-?[0-9]{1,20}$",
+            "minLength": 1,
+            "maxLength": 21,
+            "description": "TrainingPeaks workout file ID, with an optional leading minus sign.",
+        }
+        page_schema = {
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Zero-based sample offset.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "default": 500,
+                "description": "Maximum samples to return (1-1000).",
+            },
+            "channels": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": r"^(?=.*\S).+$",
+                },
+                "maxItems": 100,
+                "uniqueItems": True,
+                "description": "Optional source channel identifiers to include.",
+            },
+            "include_location": {
+                "type": "boolean",
+                "default": False,
+                "description": "Include coordinate channels. Defaults to false for privacy.",
+            },
+        }
+
+        analysis_schema = tools["tp_get_workout_timeseries"].inputSchema
+        assert analysis_schema["additionalProperties"] is False
+        assert analysis_schema["required"] == ["workout_id"]
+        assert analysis_schema["properties"]["workout_id"] == workout_id_schema
+        assert {
+            key: analysis_schema["properties"][key]
+            for key in page_schema
+        } == page_schema
+        assert set(analysis_schema["properties"]) == {
+            "athlete",
+            "channels",
+            "include_location",
+            "limit",
+            "offset",
+            "workout_id",
+        }
+
+        file_schema = tools["tp_get_workout_file_timeseries"].inputSchema
+        assert file_schema["additionalProperties"] is False
+        assert file_schema["required"] == ["workout_id", "file_id"]
+        assert file_schema["properties"]["workout_id"] == workout_id_schema
+        assert file_schema["properties"]["file_id"] == file_id_schema
+        assert {
+            key: file_schema["properties"][key]
+            for key in page_schema
+        } == page_schema
+        assert set(file_schema["properties"]) == {
+            "athlete",
+            "channels",
+            "file_id",
+            "include_location",
+            "limit",
+            "offset",
+            "workout_id",
+        }
+
+        classifier_schema = tools["tp_classify_sessions"].inputSchema
+        assert classifier_schema["additionalProperties"] is False
+        assert classifier_schema["required"] == ["workout_ids"]
+        assert set(classifier_schema["properties"]) == {
+            "athlete",
+            "preference",
+            "workout_ids",
+        }
+        workout_ids_schema = classifier_schema["properties"]["workout_ids"]
+        assert workout_ids_schema == {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    workout_id_schema,
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 99999999999999999999,
+                    },
+                ],
+            },
+            "minItems": 2,
+            "maxItems": 20,
+            "uniqueItems": True,
+        }
+        assert classifier_schema["properties"]["preference"] == {
+            "type": "string",
+            "enum": ["auto", "trainingpeaks_virtual", "garmin"],
+            "default": "auto",
+        }
+
+    def test_complete_analysis_tools_are_exported(self):
+        expected = {
+            "tp_classify_sessions",
+            "tp_get_workout_file_timeseries",
+            "tp_get_workout_timeseries",
+        }
+        assert expected.issubset(tool_exports.__all__)
+        assert all(callable(getattr(tool_exports, name)) for name in expected)
 
     @pytest.mark.asyncio
     async def test_create_workout_schema_includes_new_fields(self):
@@ -309,6 +443,117 @@ class TestGetFitnessDispatch:
         result = _parse_result(await call_tool("tp_get_fitness", {"start_date": "2025-01-01"}))
         assert result["isError"] is True
         assert result["error_code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# call_tool: hosted-safe complete analysis tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_kwargs"),
+    [
+        pytest.param(
+            "tp_get_workout_timeseries",
+            {
+                "workout_id": "3875883540",
+                "offset": 7,
+                "limit": 19,
+                "channels": ["power", "heart_rate"],
+                "include_location": True,
+            },
+            {
+                "workout_id": "3875883540",
+                "offset": 7,
+                "limit": 19,
+                "channels": ["power", "heart_rate"],
+                "include_location": True,
+            },
+            id="analysis-explicit",
+        ),
+        pytest.param(
+            "tp_get_workout_timeseries",
+            {"workout_id": "3875883540"},
+            {
+                "workout_id": "3875883540",
+                "offset": 0,
+                "limit": 500,
+                "channels": None,
+                "include_location": False,
+            },
+            id="analysis-defaults",
+        ),
+        pytest.param(
+            "tp_get_workout_file_timeseries",
+            {
+                "workout_id": "3875883540",
+                "file_id": "-542574935",
+                "offset": 11,
+                "limit": 23,
+                "channels": ["power", "cadence"],
+                "include_location": True,
+            },
+            {
+                "workout_id": "3875883540",
+                "file_id": "-542574935",
+                "offset": 11,
+                "limit": 23,
+                "channels": ["power", "cadence"],
+                "include_location": True,
+            },
+            id="fit-explicit",
+        ),
+        pytest.param(
+            "tp_get_workout_file_timeseries",
+            {"workout_id": "3875883540", "file_id": "-542574935"},
+            {
+                "workout_id": "3875883540",
+                "file_id": "-542574935",
+                "offset": 0,
+                "limit": 500,
+                "channels": None,
+                "include_location": False,
+            },
+            id="fit-defaults",
+        ),
+        pytest.param(
+            "tp_classify_sessions",
+            {
+                "workout_ids": ["3875883540", "3892963444", "3892964243"],
+                "preference": "garmin",
+            },
+            {
+                "workout_ids": ["3875883540", "3892963444", "3892964243"],
+                "preference": "garmin",
+            },
+            id="classifier-explicit",
+        ),
+        pytest.param(
+            "tp_classify_sessions",
+            {"workout_ids": ["3875883540", "3892963444"]},
+            {
+                "workout_ids": ["3875883540", "3892963444"],
+                "preference": "auto",
+            },
+            id="classifier-default",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_complete_analysis_dispatch_forwards_arguments(
+    tool_name: str,
+    arguments: dict,
+    expected_kwargs: dict,
+):
+    with patch(
+        f"tp_mcp.server.{tool_name}",
+        new_callable=AsyncMock,
+        return_value={"dispatched": tool_name},
+    ) as mock_tool:
+        result = _parse_result(await call_tool(tool_name, arguments))
+
+    assert result == {"dispatched": tool_name}
+    mock_tool.assert_awaited_once_with(**expected_kwargs)
 
 
 # ---------------------------------------------------------------------------
