@@ -11,6 +11,7 @@ from itertools import combinations
 from typing import Any, Literal
 
 from tp_mcp.client import parse_workout_analysis
+from tp_mcp.tools._privacy import is_sensitive_text
 from tp_mcp.tools.analysis_contract import is_location_field
 from tp_mcp.tools.analyze import _fetch_workout_analysis
 from tp_mcp.tools.workouts import tp_get_workout
@@ -81,10 +82,6 @@ _SENSITIVE_KEY_PARTS = (
     "serial",
     "token",
     "url",
-)
-_UNSAFE_STRING = re.compile(
-    r"(?:https?://|\bBearer\s+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|(?:^|\s)/\S+)",
-    re.IGNORECASE,
 )
 _SAFE_LABEL = re.compile(r"^[\w .()_-]{1,100}$")
 _DURATION_TEXT = re.compile(r"^\d{1,3}:\d{2}(?::\d{2}(?:\.\d+)?)?$")
@@ -316,10 +313,12 @@ def _normalized_text(value: Any) -> str:
 
 
 def _safe_nested_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _DROP
     if isinstance(value, str):
-        if len(value) > 500 or _UNSAFE_STRING.search(value):
+        if len(value) > 500 or is_sensitive_text(value):
             return _DROP
         return value
     if isinstance(value, list):
@@ -353,7 +352,7 @@ def _safe_lap(lap: dict[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             safe[key] = value
-        elif not isinstance(value, str) or _UNSAFE_STRING.search(value):
+        elif not isinstance(value, str) or is_sensitive_text(value):
             continue
         elif normalized_key in {"starttime", "stoptime"}:
             if _parse_timestamp(value) is not None:
@@ -442,7 +441,11 @@ def _normalize_analysis_metric(
 ) -> tuple[_MetricReading | None, _MetricIssue | None]:
     safe_source_unit = (
         source_unit
-        if isinstance(source_unit, str) and _SAFE_LABEL.fullmatch(source_unit)
+        if (
+            isinstance(source_unit, str)
+            and _SAFE_LABEL.fullmatch(source_unit)
+            and not is_sensitive_text(source_unit)
+        )
         else None
     )
     if safe_source_unit is None:
@@ -482,20 +485,20 @@ def _parse_timestamp(value: str | None) -> datetime | None:
         return None
 
 
-def _timestamp_delta_seconds(first: str | None, second: str | None) -> int | None:
+def _timestamp_delta_seconds(first: str | None, second: str | None) -> float | None:
     first_time = _parse_timestamp(first)
     second_time = _parse_timestamp(second)
     if first_time is None or second_time is None:
         return None
     if (first_time.tzinfo is None) != (second_time.tzinfo is None):
         return None
-    return round(abs((first_time - second_time).total_seconds()))
+    return abs((first_time - second_time).total_seconds())
 
 
-def _duration_delta_seconds(first: float | None, second: float | None) -> int | None:
+def _duration_delta_seconds(first: float | None, second: float | None) -> float | None:
     if first is None or second is None:
         return None
-    return round(abs(first - second) * 3600)
+    return abs(first - second) * 3600
 
 
 def _pair_relationship(
@@ -640,7 +643,21 @@ def _actual_metric_getter(name: str) -> Callable[[_Candidate], float | None]:
 
 def _planned_structure(candidate: _Candidate) -> Any:
     safe_value = _safe_nested_value(candidate.detail.get("structured_workout"))
-    return None if safe_value is _DROP else safe_value
+    return (
+        safe_value
+        if safe_value is not _DROP and _has_projected_content(safe_value)
+        else None
+    )
+
+
+def _has_projected_content(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_has_projected_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_projected_content(item) for item in value)
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
 
 
 def _actual_duration(candidate: _Candidate) -> float | None:
@@ -1025,7 +1042,11 @@ def _public_member(candidate: _Candidate) -> dict[str, Any]:
     raw_sport = candidate.detail.get("sport")
     safe_sport = (
         raw_sport
-        if isinstance(raw_sport, str) and _SAFE_LABEL.fullmatch(raw_sport)
+        if (
+            isinstance(raw_sport, str)
+            and _SAFE_LABEL.fullmatch(raw_sport)
+            and not is_sensitive_text(raw_sport)
+        )
         else None
     )
     return {
@@ -1078,7 +1099,7 @@ async def tp_classify_sessions(
             analysis_id, raw_analysis = await _fetch_workout_analysis(workout_id)
         except Exception:
             analysis_id, raw_analysis = None, {"error_code": "API_ERROR"}
-        analysis_available = analysis_id is not None
+        analysis_available = analysis_id is not None and isinstance(raw_analysis, dict)
         analysis: dict[str, Any] = {}
         if analysis_available:
             try:
@@ -1108,7 +1129,11 @@ async def tp_classify_sessions(
             source_errors.append({
                 "workout_id": workout_id,
                 "source": "workout_analysis",
-                "error_code": _safe_error_code(raw_analysis.get("error_code")),
+                "error_code": _safe_error_code(
+                    raw_analysis.get("error_code")
+                    if isinstance(raw_analysis, dict)
+                    else None
+                ),
                 "reason": "candidate_source_unavailable",
             })
 

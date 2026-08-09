@@ -1,5 +1,6 @@
 """Decision-table coverage for read-only workout session classification."""
 
+import json
 from copy import deepcopy
 from unittest.mock import AsyncMock, call, patch
 
@@ -24,7 +25,7 @@ def _detail(
     avg_cadence: float | None,
     file_name: str,
     planned_duration: float | None = None,
-    planned_structure: dict | None = None,
+    planned_structure: dict | list | None = None,
     source: str | None = None,
 ) -> dict:
     file_metadata = {
@@ -347,6 +348,38 @@ async def test_planned_structure_falls_through_independently_of_duration_anchor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_structure",
+    [
+        {"notes": "file:///tmp/private-plan.json"},
+        [{"notes": "tokenABC123"}],
+    ],
+)
+async def test_empty_sanitized_plan_structure_falls_through(
+    unsafe_structure: dict | list,
+):
+    """A privacy projection with no content must not win plan precedence."""
+    details, analyses = _august_9_sources()
+    fallback_structure = {"structure": [{"name": "Fallback", "length": 2700}]}
+    details[GARMIN_ID]["structured_workout"] = unsafe_structure
+    details[TPV_ID]["structured_workout"] = fallback_structure
+    details[TPV_ID]["metrics"]["duration_planned"] = None
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    assert result["clusters"][0]["canonical_fields"]["planned_structure"] == {
+        "value": fallback_structure,
+        "unit": None,
+        "source_workout_id": TPV_ID,
+        "method": "planned_field_fallback",
+    }
+
+
+@pytest.mark.asyncio
 async def test_physiology_falls_through_to_analysis_channel_average():
     """A null detail metric must not hide a field the member's analysis exposes."""
     details, analyses = _august_9_sources()
@@ -457,6 +490,57 @@ async def test_incompatible_analysis_metric_unit_is_withheld_with_evidence():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_unit",
+    [
+        "Bearer opaque-secret",
+        "authorizationABC123",
+        "credentialABC123",
+        "cookieABC123",
+        "passwordABC123",
+        "secretABC123",
+        "tokenABC123",
+        "https://signed.example/unit?token=ABC123",
+        "file:///tmp/private-unit",
+        "private@example.com",
+        "/tmp/private-unit",
+        r"C:\Users\private\unit",
+        "watts\nprivate",
+    ],
+)
+async def test_sensitive_analysis_unit_is_withheld_without_echo(
+    unsafe_unit: str,
+):
+    """A source unit is evidence only when its scalar text is privacy-safe."""
+    details, analyses = _august_9_sources()
+    for detail in details.values():
+        detail["metrics"]["avg_power"] = None
+    analyses[GARMIN_ID]["dataElements"] = [
+        {
+            "identifier": "Power",
+            "name": "Power",
+            "unit": unsafe_unit,
+            "average": 200,
+        }
+    ]
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    cluster = result["clusters"][0]
+    assert "average_power" not in cluster["canonical_fields"]
+    assert {
+        "field": "average_power",
+        "reason": "missing_or_invalid_source_unit",
+        "candidates": [{"workout_id": GARMIN_ID, "value": 200}],
+    } in cluster["unresolved_fields"]
+    assert unsafe_unit not in str(result)
+
+
+@pytest.mark.asyncio
 async def test_public_members_and_laps_never_echo_unsafe_nested_metadata():
     """Removing lap redaction or member projection would leak private source values."""
     details, analyses = _august_9_sources()
@@ -470,6 +554,13 @@ async def test_public_members_and_laps_never_echo_unsafe_nested_metadata():
                 "length": 3000,
                 "notes": "private@example.com /tmp/private-plan.fit",
                 "gps_lat": 46.1,
+                "coach_note": r"C:\Users\private\plan.fit",
+                "resource": "file:///tmp/private-plan.fit",
+                "prefixed_resource": "label_file:///tmp/private-plan.fit",
+                "prefixed_url": "label_https://signed.example/private-plan.fit",
+                "session_code": "tokenABC123",
+                "control_text": "safe\u0000private",
+                "unstable_value": float("nan"),
             }
         ],
         "downloadUrl": "https://signed.example/private-plan-token",
@@ -504,8 +595,80 @@ async def test_public_members_and_laps_never_echo_unsafe_nested_metadata():
     assert "/tmp/private" not in serialized
     assert "signed.example" not in serialized
     assert "opaque-secret" not in serialized
+    assert r"C:\Users\private" not in serialized
+    assert "file:///tmp/private" not in serialized
+    assert "tokenABC123" not in serialized
+    assert "safe\\x00private" not in serialized
     assert "gps_lat" not in serialized
     assert "position_long" not in serialized
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_unresolved_plan_evidence_recursively_removes_sensitive_values():
+    """A tied plan conflict must not echo unsafe values in candidate evidence."""
+    details, analyses = _august_9_sources()
+    first = details[TPV_ID]
+    second = deepcopy(first)
+    second["id"] = APPLE_ID
+    second["title"] = "TrainingPeaks Virtual - second ingest"
+    first["metrics"]["duration_planned"] = 0.75
+    second["metrics"]["duration_planned"] = 0.75
+    first["structured_workout"] = {
+        "structure": [
+            {
+                "name": "First",
+                "coach_note": r"C:\Users\private\plan.fit",
+                "unstable_value": float("inf"),
+            }
+        ],
+        "resource": "file:///tmp/private-plan.fit",
+    }
+    second["structured_workout"] = {
+        "structure": [
+            {
+                "name": "Second",
+                "session_code": "secretABC123",
+                "unstable_value": float("-inf"),
+            }
+        ],
+        "safe_label": "Second",
+    }
+    details = {TPV_ID: first, APPLE_ID: second}
+    analyses = {
+        TPV_ID: _analysis(TPV_ID, start="2026-08-09T10:29:10Z"),
+        APPLE_ID: _analysis(APPLE_ID, start="2026-08-09T10:29:26Z"),
+    }
+
+    result, _, _ = await _classify(details, analyses, [TPV_ID, APPLE_ID])
+
+    cluster = result["clusters"][0]
+    assert "planned_structure" not in cluster["canonical_fields"]
+    assert {
+        "field": "planned_structure",
+        "reason": "material_tied_conflict",
+        "candidates": [
+            {
+                "workout_id": TPV_ID,
+                "value": {"structure": [{"name": "First"}]},
+            },
+            {
+                "workout_id": APPLE_ID,
+                "value": {
+                    "structure": [{"name": "Second"}],
+                    "safe_label": "Second",
+                },
+            },
+        ],
+    } in cluster["unresolved_fields"]
+    serialized = str(result)
+    for private_value in (
+        r"C:\Users\private",
+        "file:///tmp/private",
+        "secretABC123",
+    ):
+        assert private_value not in serialized
+    json.dumps(result, allow_nan=False)
 
 
 @pytest.mark.asyncio
@@ -597,6 +760,62 @@ async def test_start_threshold_boundaries_are_explicit(
     pair = result["pairwise_evidence"][0]
     assert pair["relationship"] == expected_relationship
     assert pair["evidence"]["start_delta_seconds"] == start_delta_seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "second_start",
+        "second_duration_hours",
+        "evidence_field",
+        "expected_delta_seconds",
+    ),
+    [
+        (
+            "2026-08-09T10:05:00.001Z",
+            1.0,
+            "start_delta_seconds",
+            300.001,
+        ),
+        (
+            "2026-08-09T10:00:00Z",
+            1.1666669444444444,
+            "duration_delta_seconds",
+            600.001,
+        ),
+        (
+            "2026-08-09T10:19:59.999Z",
+            1.0,
+            "start_delta_seconds",
+            1199.999,
+        ),
+    ],
+)
+async def test_fractional_threshold_deltas_are_compared_exactly(
+    second_start: str,
+    second_duration_hours: float,
+    evidence_field: str,
+    expected_delta_seconds: float,
+):
+    """Rounding before comparison must not move a candidate across a threshold."""
+    details, analyses = _august_9_sources()
+    details[GARMIN_ID]["metrics"]["duration_actual"] = 1.0
+    details[TPV_ID]["metrics"]["duration_actual"] = second_duration_hours
+    analyses[GARMIN_ID]["startTimestamp"] = "2026-08-09T10:00:00Z"
+    analyses[TPV_ID]["startTimestamp"] = second_start
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID],
+    )
+
+    pair = result["pairwise_evidence"][0]
+    assert pair["relationship"] == "unresolved"
+    assert pair["evidence"][evidence_field] == pytest.approx(
+        expected_delta_seconds,
+        abs=1e-9,
+    )
 
 
 @pytest.mark.asyncio
@@ -751,6 +970,46 @@ async def test_candidate_read_failure_is_stable_partial_unresolved(
     assert "signed.example" not in serialized
     assert "/tmp/private.fit" not in serialized
     assert "private@example.com" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_malformed_analysis_fetch_tuple_is_stable_partial_unresolved():
+    """A malformed helper result must not raise or permit partial canonicalization."""
+    details, analyses = _august_9_sources()
+    detail_fetch = AsyncMock(side_effect=lambda workout_id: deepcopy(details[workout_id]))
+    analysis_fetch = AsyncMock(
+        side_effect=lambda workout_id: (
+            (None, None)
+            if workout_id == TPV_ID
+            else (int(workout_id), deepcopy(analyses[workout_id]))
+        )
+    )
+
+    with (
+        patch("tp_mcp.tools.session_identity.tp_get_workout", detail_fetch),
+        patch(
+            "tp_mcp.tools.session_identity._fetch_workout_analysis",
+            analysis_fetch,
+        ),
+    ):
+        result = await tp_classify_sessions([GARMIN_ID, TPV_ID])
+
+    assert result["relationship"] == "unresolved"
+    assert result["availability"] == {
+        "state": "partial",
+        "reason": "candidate_source_unavailable",
+        "source": "trainingpeaks_session_classifier",
+    }
+    assert result["source_errors"] == [
+        {
+            "workout_id": TPV_ID,
+            "source": "workout_analysis",
+            "error_code": "API_ERROR",
+            "reason": "candidate_source_unavailable",
+        }
+    ]
+    assert all(cluster["canonical_fields"] == {} for cluster in result["clusters"])
+    assert all(cluster["excluded_workout_ids"] == [] for cluster in result["clusters"])
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from typing import Any, Literal, NamedTuple
 from pydantic import ValidationError
 
 from tp_mcp.client import TPClient, parse_workout_detail, parse_workout_list
+from tp_mcp.tools._privacy import is_sensitive_text
 from tp_mcp.tools._validation import (
     CreateWorkoutInput,
     DateRangeInput,
@@ -33,14 +34,6 @@ _SAFE_CONTENT_TYPE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/"
     r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$"
 )
-_SENSITIVE_FILE_VALUE = re.compile(
-    r"(?:https?://|[A-Za-z]:[\\/]|(?:^|\s)/\S+|"
-    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
-    r"\b(?:authorization|bearer|cookie|password|secret|token)\b)",
-    re.IGNORECASE,
-)
-
-
 class StructurePayload(NamedTuple):
     wire_structure: dict | None
     duration_minutes: float | None
@@ -53,7 +46,7 @@ def _validated_file_string(value: Any, validator: re.Pattern[str]) -> str | None
     if (
         isinstance(value, str)
         and validator.fullmatch(value)
-        and not _SENSITIVE_FILE_VALUE.search(value)
+        and not is_sensitive_text(value)
     ):
         return value
     return None
@@ -89,7 +82,7 @@ def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
         if (
             isinstance(uploaded_at, str)
             and len(uploaded_at) <= 64
-            and not _SENSITIVE_FILE_VALUE.search(uploaded_at)
+            and not is_sensitive_text(uploaded_at)
         ):
             try:
                 datetime_type.fromisoformat(

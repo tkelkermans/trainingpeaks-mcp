@@ -256,8 +256,8 @@ class TestTpGetWorkout:
                 "workoutDeviceFileInfos": [
                     *[
                         {
-                            "fileId": {"nested": source_field},
-                            source_field: "Bearer token cookie secret",
+                            "fileId": {"nested": f"{source_field}-{prefix}"},
+                            source_field: f"{prefix}ABC123",
                         }
                         for source_field in (
                             "fileName",
@@ -269,6 +269,12 @@ class TestTpGetWorkout:
                             "manufacturer",
                             "product",
                             "processingStatus",
+                        )
+                        for prefix in (
+                            "token",
+                            "secret",
+                            "cookie",
+                            "password",
                         )
                     ],
                     {
@@ -372,6 +378,16 @@ class TestTpGetWorkout:
                         "product": "Edge 1040 Solar",
                         "processingStatus": "processed",
                     },
+                    {
+                        "fileId": 901,
+                        "fileName": "D0497FD51A72A2B3_20260809_102830_s.fit.gz",
+                        "source": "TrainingPeaks Virtual",
+                    },
+                    {
+                        "fileId": 902,
+                        "fileName": "20260809_TPAppleHealth_indoor.fit.gz",
+                        "source": "TPAppleHealth",
+                    },
                 ],
                 "attachmentFileInfos": [],
             },
@@ -404,7 +420,17 @@ class TestTpGetWorkout:
                 "manufacturer": "Garmin",
                 "product": "Edge 1040 Solar",
                 "processing_status": "processed",
-            }
+            },
+            {
+                "file_id": "901",
+                "file_name": "D0497FD51A72A2B3_20260809_102830_s.fit.gz",
+                "source": "TrainingPeaks Virtual",
+            },
+            {
+                "file_id": "902",
+                "file_name": "20260809_TPAppleHealth_indoor.fit.gz",
+                "source": "TPAppleHealth",
+            },
         ]
         serialized = json.dumps(result)
         for private_value in (
@@ -415,6 +441,10 @@ class TestTpGetWorkout:
             "signed.example",
             "opaque-secret",
             "session-secret",
+            "tokenABC123",
+            "secretABC123",
+            "cookieABC123",
+            "passwordABC123",
         ):
             assert private_value not in serialized
 
