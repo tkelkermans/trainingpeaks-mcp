@@ -21,6 +21,7 @@ Relationship = Literal["same_session", "distinct", "unresolved"]
 CLASSIFIER_SOURCE = "trainingpeaks_session_classifier"
 POLICY_VERSION = "1.0"
 MAX_CANDIDATES = 20
+MAX_WORKOUT_ID_DIGITS = 20
 SAME_START_MAX_SECONDS = 300
 DISTINCT_START_MIN_SECONDS = 1200
 DURATION_MATCH_MAX_SECONDS = 600
@@ -96,6 +97,58 @@ _SAFE_ERROR_CODES = {
     "NOT_FOUND",
     "VALIDATION_ERROR",
 }
+_CANONICAL_METRIC_UNITS = {
+    "avg_power": "W",
+    "normalized_power": "W",
+    "avg_hr": "bpm",
+    "avg_cadence": "rpm",
+    "tss_actual": "TSS",
+}
+_METRIC_UNIT_CONVERSIONS: dict[str, dict[str, tuple[float, str | None]]] = {
+    "avg_power": {
+        "w": (1.0, None),
+        "watt": (1.0, None),
+        "watts": (1.0, None),
+        "kw": (1000.0, "kW_to_W"),
+        "kilowatt": (1000.0, "kW_to_W"),
+        "kilowatts": (1000.0, "kW_to_W"),
+    },
+    "normalized_power": {
+        "w": (1.0, None),
+        "watt": (1.0, None),
+        "watts": (1.0, None),
+        "kw": (1000.0, "kW_to_W"),
+        "kilowatt": (1000.0, "kW_to_W"),
+        "kilowatts": (1000.0, "kW_to_W"),
+    },
+    "avg_hr": {
+        "bpm": (1.0, None),
+        "beatsperminute": (1.0, None),
+    },
+    "avg_cadence": {
+        "rpm": (1.0, None),
+        "revolutionsperminute": (1.0, None),
+    },
+    "tss_actual": {
+        "tss": (1.0, None),
+    },
+}
+
+
+@dataclass(frozen=True)
+class _MetricReading:
+    value: float
+    unit: str
+    source: str
+    source_unit: str | None = None
+    conversion: str | None = None
+
+
+@dataclass(frozen=True)
+class _MetricIssue:
+    value: float
+    reason: str
+    source_unit: str | None
 
 
 @dataclass
@@ -128,10 +181,20 @@ class _Candidate:
     def actual_duration(self) -> float | None:
         return _as_float(self.metrics.get("duration_actual"))
 
-    def actual_metric(self, name: str) -> float | None:
+    def actual_metric_result(
+        self,
+        name: str,
+    ) -> tuple[_MetricReading | None, _MetricIssue | None]:
         detail_value = _as_float(self.metrics.get(name))
         if detail_value is not None:
-            return detail_value
+            return (
+                _MetricReading(
+                    value=detail_value,
+                    unit=_CANONICAL_METRIC_UNITS[name],
+                    source="workout_detail",
+                ),
+                None,
+            )
         channel_names = {
             "avg_power": {"power", "averagepower"},
             "avg_hr": {"heartrate", "averageheartrate"},
@@ -150,7 +213,11 @@ class _Candidate:
                 if identifiers & expected_channels:
                     average = _as_float(channel.get("average"))
                     if average is not None:
-                        return average
+                        return _normalize_analysis_metric(
+                            name,
+                            average,
+                            channel.get("unit"),
+                        )
         total_names = {
             "normalized_power": {"np", "normalizedpower"},
             "tss_actual": {"tss", "trainingstressscore"},
@@ -164,8 +231,13 @@ class _Candidate:
                 raw_value = total.get("value") if isinstance(total, dict) else total
                 total_value = _as_float(raw_value)
                 if total_value is not None:
-                    return total_value
-        return None
+                    source_unit = total.get("unit") if isinstance(total, dict) else None
+                    return _normalize_analysis_metric(name, total_value, source_unit)
+        return None, None
+
+    def actual_metric(self, name: str) -> float | None:
+        reading, _ = self.actual_metric_result(name)
+        return reading.value if reading is not None else None
 
     @property
     def laps(self) -> list[dict[str, Any]] | None:
@@ -215,12 +287,22 @@ def _validate_inputs(
 
     normalized: list[str] = []
     for value in workout_ids:
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
             return None, _validation_error("workout IDs must be positive integers.")
-        text = str(value).strip()
-        if not text.isdigit() or int(text) <= 0:
+        if isinstance(value, int):
+            if value <= 0 or value >= 10**MAX_WORKOUT_ID_DIGITS:
+                return None, _validation_error("workout IDs must be positive integers.")
+            canonical = str(value)
+        else:
+            text = value.strip()
+            if (
+                not 1 <= len(text) <= MAX_WORKOUT_ID_DIGITS
+                or re.fullmatch(r"[0-9]+", text) is None
+            ):
+                return None, _validation_error("workout IDs must be positive integers.")
+            canonical = str(int(text))
+        if canonical == "0":
             return None, _validation_error("workout IDs must be positive integers.")
-        canonical = str(int(text))
         if canonical in normalized:
             return None, _validation_error("workout IDs must be unique.")
         normalized.append(canonical)
@@ -351,6 +433,44 @@ def _as_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _normalize_analysis_metric(
+    name: str,
+    value: float,
+    source_unit: Any,
+) -> tuple[_MetricReading | None, _MetricIssue | None]:
+    safe_source_unit = (
+        source_unit
+        if isinstance(source_unit, str) and _SAFE_LABEL.fullmatch(source_unit)
+        else None
+    )
+    if safe_source_unit is None:
+        return None, _MetricIssue(
+            value=value,
+            reason="missing_or_invalid_source_unit",
+            source_unit=None,
+        )
+    conversion = _METRIC_UNIT_CONVERSIONS[name].get(
+        _normalized_text(safe_source_unit)
+    )
+    if conversion is None:
+        return None, _MetricIssue(
+            value=value,
+            reason="incompatible_source_unit",
+            source_unit=safe_source_unit,
+        )
+    multiplier, conversion_name = conversion
+    return (
+        _MetricReading(
+            value=value * multiplier,
+            unit=_CANONICAL_METRIC_UNITS[name],
+            source="workout_analysis",
+            source_unit=safe_source_unit,
+            conversion=conversion_name,
+        ),
+        None,
+    )
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -487,13 +607,21 @@ def _field(
     unit: str | None,
     candidate: _Candidate,
     method: str,
+    *,
+    source_unit: str | None = None,
+    conversion: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "value": value,
         "unit": unit,
         "source_workout_id": candidate.workout_id,
         "method": method,
     }
+    if source_unit is not None:
+        result["source_unit"] = source_unit
+    if conversion is not None:
+        result["conversion"] = conversion
+    return result
 
 
 def _metric_getter(name: str) -> Callable[[_Candidate], Any]:
@@ -560,6 +688,50 @@ def _choose(
     return tied[0]
 
 
+def _metric_unit_issue(
+    candidates: list[_Candidate],
+    *,
+    field_name: str,
+    metric_name: str,
+    rank: Callable[[_Candidate], tuple[int, ...]],
+    selected: _Candidate | None,
+) -> dict[str, Any] | None:
+    issues = [
+        (candidate, issue)
+        for candidate in candidates
+        if (issue := candidate.actual_metric_result(metric_name)[1]) is not None
+    ]
+    if not issues:
+        return None
+    best_issue_rank = max(rank(candidate) for candidate, _ in issues)
+    if selected is not None and best_issue_rank < rank(selected):
+        return None
+    top_issues = [
+        (candidate, issue)
+        for candidate, issue in issues
+        if rank(candidate) == best_issue_rank
+    ]
+    reason = (
+        "incompatible_source_unit"
+        if any(issue.reason == "incompatible_source_unit" for _, issue in top_issues)
+        else "missing_or_invalid_source_unit"
+    )
+    issue_candidates: list[dict[str, Any]] = []
+    for candidate, issue in top_issues:
+        entry: dict[str, Any] = {
+            "workout_id": candidate.workout_id,
+            "value": issue.value,
+        }
+        if issue.source_unit is not None:
+            entry["source_unit"] = issue.source_unit
+        issue_candidates.append(entry)
+    return {
+        "field": field_name,
+        "reason": reason,
+        "candidates": issue_candidates,
+    }
+
+
 def _execution_rank(candidate: _Candidate, preference: Preference) -> tuple[int, int]:
     if preference != "auto" and candidate.provider == preference:
         provider_rank = 3
@@ -578,29 +750,28 @@ def _execution_method(candidate: _Candidate, preference: Preference) -> str:
     return "richest_actual_fallback"
 
 
+def _plan_rank(candidate: _Candidate) -> tuple[int, int, int, int, int]:
+    return (
+        int(candidate.detail.get("structured_workout") is not None),
+        int(candidate.metrics.get("duration_planned") is not None),
+        int(candidate.metrics.get("tss_planned") is not None),
+        int(candidate.provider == "garmin"),
+        _richness(candidate),
+    )
+
+
 def _plan_anchor(candidates: list[_Candidate]) -> tuple[_Candidate | None, list[_Candidate]]:
-    planned = [
+    planned_candidates = [
         candidate
         for candidate in candidates
         if candidate.metrics.get("duration_planned") is not None
         or candidate.metrics.get("tss_planned") is not None
         or candidate.detail.get("structured_workout") is not None
     ]
-    if not planned:
+    if not planned_candidates:
         return None, []
-
-    def rank(candidate: _Candidate) -> tuple[int, int, int, int, int]:
-        return (
-            int(candidate.detail.get("structured_workout") is not None),
-            int(candidate.metrics.get("duration_planned") is not None),
-            int(candidate.metrics.get("tss_planned") is not None),
-            int(candidate.provider == "garmin"),
-            _richness(candidate),
-        )
-
-    best_rank = max(rank(candidate) for candidate in planned)
-    tied = [candidate for candidate in planned if rank(candidate) == best_rank]
-    return tied[0], tied
+    ordered = sorted(planned_candidates, key=_plan_rank, reverse=True)
+    return ordered[0], ordered
 
 
 def _physiology_rank(
@@ -653,7 +824,7 @@ def _canonicalize(
     canonical: dict[str, Any] = {}
     unresolved_fields: list[dict[str, Any]] = []
     contributors: set[str] = set()
-    anchor, tied_anchors = _plan_anchor(candidates)
+    anchor, planned_candidates = _plan_anchor(candidates)
     if anchor is not None:
         anchor.roles.add("plan_anchor")
         planned_values = (
@@ -667,10 +838,10 @@ def _canonicalize(
                 else _metric_getter(source_name)
             )
             selected = _choose(
-                tied_anchors,
+                planned_candidates,
                 field_name=output_name,
                 value=plan_getter,
-                rank=lambda candidate: (0,),
+                rank=_plan_rank,
                 tolerance=tolerance,
                 unresolved_fields=unresolved_fields,
             )
@@ -679,7 +850,11 @@ def _canonicalize(
                     plan_getter(selected),
                     unit,
                     selected,
-                    "plan_anchor",
+                    (
+                        "plan_anchor"
+                        if selected.workout_id == anchor.workout_id
+                        else "planned_field_fallback"
+                    ),
                 )
                 contributors.add(selected.workout_id)
 
@@ -711,31 +886,44 @@ def _canonicalize(
             )
 
     physiology_fields = (
-        ("average_power", "avg_power", "W", 2.0),
-        ("normalized_power", "normalized_power", "W", 2.0),
-        ("average_heart_rate", "avg_hr", "bpm", 2.0),
-        ("average_cadence", "avg_cadence", "rpm", 2.0),
+        ("average_power", "avg_power", 2.0),
+        ("normalized_power", "normalized_power", 2.0),
+        ("average_heart_rate", "avg_hr", 2.0),
+        ("average_cadence", "avg_cadence", 2.0),
     )
-    for output_name, source_name, unit, tolerance in physiology_fields:
+    for output_name, source_name, tolerance in physiology_fields:
         physiology_getter = _actual_metric_getter(source_name)
+
+        def physiology_rank(candidate: _Candidate) -> tuple[int, int]:
+            return _physiology_rank(candidate, anchor, execution_ids)
+
         selected = _choose(
             candidates,
             field_name=output_name,
             value=physiology_getter,
-            rank=lambda candidate: _physiology_rank(
-                candidate,
-                anchor,
-                execution_ids,
-            ),
+            rank=physiology_rank,
             tolerance=tolerance,
             unresolved_fields=unresolved_fields,
         )
+        unit_issue = _metric_unit_issue(
+            candidates,
+            field_name=output_name,
+            metric_name=source_name,
+            rank=physiology_rank,
+            selected=selected,
+        )
+        if unit_issue is not None:
+            unresolved_fields.append(unit_issue)
+            continue
         if selected is not None:
+            reading, _ = selected.actual_metric_result(source_name)
+            if reading is None:
+                continue
             selected.roles.add("physiology_auxiliary")
             contributors.add(selected.workout_id)
             canonical[output_name] = _field(
-                physiology_getter(selected),
-                unit,
+                reading.value,
+                reading.unit,
                 selected,
                 (
                     "plan_anchor_field_source"
@@ -743,25 +931,45 @@ def _canonicalize(
                     and selected.workout_id == anchor.workout_id
                     else "available_field_precedence"
                 ),
+                source_unit=reading.source_unit,
+                conversion=reading.conversion,
             )
 
     tss_getter = _actual_metric_getter("tss_actual")
+
+    def tss_rank(candidate: _Candidate) -> tuple[int, int]:
+        return _tss_rank(candidate, preference, anchor)
+
     tss_source = _choose(
         candidates,
         field_name="actual_tss",
         value=tss_getter,
-        rank=lambda candidate: _tss_rank(candidate, preference, anchor),
+        rank=tss_rank,
         tolerance=0.5,
         unresolved_fields=unresolved_fields,
     )
+    tss_unit_issue = _metric_unit_issue(
+        candidates,
+        field_name="actual_tss",
+        metric_name="tss_actual",
+        rank=tss_rank,
+        selected=tss_source,
+    )
+    if tss_unit_issue is not None:
+        unresolved_fields.append(tss_unit_issue)
+        tss_source = None
     if tss_source is not None:
-        contributors.add(tss_source.workout_id)
-        canonical["actual_tss"] = _field(
-            tss_getter(tss_source),
-            "TSS",
-            tss_source,
-            _tss_method(tss_source, preference, anchor),
-        )
+        tss_reading, _ = tss_source.actual_metric_result("tss_actual")
+        if tss_reading is not None:
+            contributors.add(tss_source.workout_id)
+            canonical["actual_tss"] = _field(
+                tss_reading.value,
+                tss_reading.unit,
+                tss_source,
+                _tss_method(tss_source, preference, anchor),
+                source_unit=tss_reading.source_unit,
+                conversion=tss_reading.conversion,
+            )
 
     excluded = [
         candidate.workout_id
@@ -846,18 +1054,30 @@ async def tp_classify_sessions(
     candidates: list[_Candidate] = []
     source_errors: list[dict[str, str]] = []
     for workout_id in normalized_ids:
-        detail_result = await tp_get_workout(workout_id)
-        detail_available = not bool(detail_result.get("isError"))
+        try:
+            detail_result = await tp_get_workout(workout_id)
+        except Exception:
+            detail_result = {"isError": True, "error_code": "API_ERROR"}
+        detail_available = isinstance(detail_result, dict) and not bool(
+            detail_result.get("isError")
+        )
         detail = detail_result if detail_available else {}
         if not detail_available:
             source_errors.append({
                 "workout_id": workout_id,
                 "source": "workout_detail",
-                "error_code": _safe_error_code(detail_result.get("error_code")),
+                "error_code": _safe_error_code(
+                    detail_result.get("error_code")
+                    if isinstance(detail_result, dict)
+                    else None
+                ),
                 "reason": "candidate_source_unavailable",
             })
 
-        analysis_id, raw_analysis = await _fetch_workout_analysis(workout_id)
+        try:
+            analysis_id, raw_analysis = await _fetch_workout_analysis(workout_id)
+        except Exception:
+            analysis_id, raw_analysis = None, {"error_code": "API_ERROR"}
         analysis_available = analysis_id is not None
         analysis: dict[str, Any] = {}
         if analysis_available:

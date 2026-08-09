@@ -297,6 +297,56 @@ async def test_null_explicit_tss_falls_through_to_plan_paired_garmin():
 
 
 @pytest.mark.asyncio
+async def test_planned_duration_falls_through_independently_of_structure_anchor():
+    """A structure-rich anchor with null duration must not hide another plan duration."""
+    details, analyses = _august_9_sources()
+    details[GARMIN_ID]["metrics"]["duration_planned"] = None
+    details[TPV_ID]["metrics"]["duration_planned"] = 0.75
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    canonical = result["clusters"][0]["canonical_fields"]
+    assert canonical["planned_structure"]["source_workout_id"] == GARMIN_ID
+    assert canonical["planned_structure"]["method"] == "plan_anchor"
+    assert canonical["planned_duration"] == {
+        "value": 0.75,
+        "unit": "h",
+        "source_workout_id": TPV_ID,
+        "method": "planned_field_fallback",
+    }
+
+
+@pytest.mark.asyncio
+async def test_planned_structure_falls_through_independently_of_duration_anchor():
+    """A duration anchor with unusable structure must not hide another safe structure."""
+    details, analyses = _august_9_sources()
+    fallback_structure = {"structure": [{"name": "Fallback", "length": 2700}]}
+    details[GARMIN_ID]["structured_workout"] = "/tmp/private-plan.json"
+    details[TPV_ID]["structured_workout"] = fallback_structure
+    details[TPV_ID]["metrics"]["duration_planned"] = None
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    canonical = result["clusters"][0]["canonical_fields"]
+    assert canonical["planned_duration"]["source_workout_id"] == GARMIN_ID
+    assert canonical["planned_duration"]["method"] == "plan_anchor"
+    assert canonical["planned_structure"] == {
+        "value": fallback_structure,
+        "unit": None,
+        "source_workout_id": TPV_ID,
+        "method": "planned_field_fallback",
+    }
+
+
+@pytest.mark.asyncio
 async def test_physiology_falls_through_to_analysis_channel_average():
     """A null detail metric must not hide a field the member's analysis exposes."""
     details, analyses = _august_9_sources()
@@ -319,9 +369,91 @@ async def test_physiology_falls_through_to_analysis_channel_average():
     assert result["clusters"][0]["canonical_fields"]["average_heart_rate"] == {
         "value": 119,
         "unit": "bpm",
+        "source_unit": "bpm",
         "source_workout_id": GARMIN_ID,
         "method": "plan_anchor_field_source",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_value", "source_unit", "expected_value", "expected_conversion"),
+    [
+        (200, "W", 200, None),
+        (0.2, "kW", 200, "kW_to_W"),
+    ],
+)
+async def test_analysis_power_units_are_preserved_or_converted(
+    source_value: float,
+    source_unit: str,
+    expected_value: float,
+    expected_conversion: str | None,
+):
+    """Analysis fallback must not relabel noncanonical power values as watts."""
+    details, analyses = _august_9_sources()
+    for detail in details.values():
+        detail["metrics"]["avg_power"] = None
+    analyses[GARMIN_ID]["dataElements"] = [
+        {
+            "identifier": "Power",
+            "name": "Power",
+            "unit": source_unit,
+            "average": source_value,
+        }
+    ]
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    expected = {
+        "value": expected_value,
+        "unit": "W",
+        "source_unit": source_unit,
+        "source_workout_id": GARMIN_ID,
+        "method": "plan_anchor_field_source",
+    }
+    if expected_conversion is not None:
+        expected["conversion"] = expected_conversion
+    assert result["clusters"][0]["canonical_fields"]["average_power"] == expected
+
+
+@pytest.mark.asyncio
+async def test_incompatible_analysis_metric_unit_is_withheld_with_evidence():
+    """An incompatible source unit must not receive a false canonical label."""
+    details, analyses = _august_9_sources()
+    for detail in details.values():
+        detail["metrics"]["avg_power"] = None
+    analyses[GARMIN_ID]["dataElements"] = [
+        {
+            "identifier": "Power",
+            "name": "Power",
+            "unit": "bpm",
+            "average": 200,
+        }
+    ]
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    cluster = result["clusters"][0]
+    assert "average_power" not in cluster["canonical_fields"]
+    assert {
+        "field": "average_power",
+        "reason": "incompatible_source_unit",
+        "candidates": [
+            {
+                "workout_id": GARMIN_ID,
+                "value": 200,
+                "source_unit": "bpm",
+            }
+        ],
+    } in cluster["unresolved_fields"]
 
 
 @pytest.mark.asyncio
@@ -622,6 +754,68 @@ async def test_candidate_read_failure_is_stable_partial_unresolved(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("raised_source", ["workout_detail", "workout_analysis"])
+async def test_candidate_read_exception_is_stable_partial_unresolved(
+    raised_source: str,
+):
+    """A raised source exception must be isolated without leaking its text."""
+    details, analyses = _august_9_sources()
+
+    async def detail_fetch(workout_id: str) -> dict:
+        if raised_source == "workout_detail" and workout_id == TPV_ID:
+            raise RuntimeError(
+                "https://signed.example/private /tmp/private.fit private@example.com"
+            )
+        return deepcopy(details[workout_id])
+
+    async def analysis_fetch(workout_id: str) -> tuple[int, dict]:
+        if raised_source == "workout_analysis" and workout_id == TPV_ID:
+            raise RuntimeError(
+                "Bearer opaque-secret C:\\Users\\private\\analysis.fit"
+            )
+        return int(workout_id), deepcopy(analyses[workout_id])
+
+    detail_mock = AsyncMock(side_effect=detail_fetch)
+    analysis_mock = AsyncMock(side_effect=analysis_fetch)
+    with (
+        patch("tp_mcp.tools.session_identity.tp_get_workout", detail_mock),
+        patch(
+            "tp_mcp.tools.session_identity._fetch_workout_analysis",
+            analysis_mock,
+        ),
+    ):
+        result = await tp_classify_sessions([GARMIN_ID, TPV_ID])
+
+    assert result["relationship"] == "unresolved"
+    assert result["availability"] == {
+        "state": "partial",
+        "reason": "candidate_source_unavailable",
+        "source": "trainingpeaks_session_classifier",
+    }
+    assert result["source_errors"] == [
+        {
+            "workout_id": TPV_ID,
+            "source": raised_source,
+            "error_code": "API_ERROR",
+            "reason": "candidate_source_unavailable",
+        }
+    ]
+    assert all(cluster["canonical_fields"] == {} for cluster in result["clusters"])
+    assert all(cluster["excluded_workout_ids"] == [] for cluster in result["clusters"])
+    assert detail_mock.await_args_list == [call(GARMIN_ID), call(TPV_ID)]
+    assert analysis_mock.await_args_list == [call(GARMIN_ID), call(TPV_ID)]
+    serialized = str(result)
+    for private_value in (
+        "signed.example",
+        "/tmp/private.fit",
+        "private@example.com",
+        "opaque-secret",
+        r"C:\Users\private",
+    ):
+        assert private_value not in serialized
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("workout_ids", "preference"),
     [
@@ -630,6 +824,8 @@ async def test_candidate_read_failure_is_stable_partial_unresolved(
         ([GARMIN_ID, GARMIN_ID], "auto"),
         ([GARMIN_ID, TPV_ID], "strava"),
         ([str(index) for index in range(1, 22)], "auto"),
+        (["²", TPV_ID], "auto"),
+        (["9" * 100, TPV_ID], "auto"),
     ],
 )
 async def test_rejects_invalid_ids_and_preferences(

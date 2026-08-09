@@ -254,6 +254,23 @@ class TestTpGetWorkout:
             success=True,
             data={
                 "workoutDeviceFileInfos": [
+                    *[
+                        {
+                            "fileId": {"nested": source_field},
+                            source_field: "Bearer token cookie secret",
+                        }
+                        for source_field in (
+                            "fileName",
+                            "dateUploaded",
+                            "fileType",
+                            "contentType",
+                            "source",
+                            "deviceName",
+                            "manufacturer",
+                            "product",
+                            "processingStatus",
+                        )
+                    ],
                     {
                         "fileId": -542574935,
                         "fileSystemId": 7,
@@ -309,6 +326,97 @@ class TestTpGetWorkout:
         assert "private@example.com" not in serialized
         assert "SERIAL-SECRET" not in serialized
         assert "opaque-secret" not in serialized
+
+    @pytest.mark.asyncio
+    async def test_get_workout_validates_every_file_metadata_value(
+        self,
+        mock_api_responses,
+    ):
+        """Allowlisted keys must not make nested or secret-bearing values safe."""
+        workout_response = APIResponse(
+            success=True,
+            data=dict(mock_api_responses["workout_detail"]),
+        )
+        details_response = APIResponse(
+            success=True,
+            data={
+                "workoutDeviceFileInfos": [
+                    {
+                        "fileId": {"token": "nested-private"},
+                        "fileSystemId": ["private@example.com"],
+                        "fileName": "https://signed.example/private.fit?token=secret",
+                        "dateUploaded": "/tmp/private-uploaded-at",
+                        "fileSize": {"secret": 48123},
+                        "fileType": "Bearer opaque-secret",
+                        "contentType": "application/gzip?token=secret",
+                        "source": "cookie=session-secret",
+                        "deviceName": "/Users/private/device",
+                        "manufacturer": r"C:\Users\private\manufacturer",
+                        "product": {"url": "https://signed.example/product"},
+                        "processingStatus": "private@example.com",
+                    },
+                    {
+                        "fileId": -542574935,
+                        "fileSystemId": 7,
+                        "fileName": (
+                            "tp-3693769.2026-08-09-11-20-29-590Z."
+                            "GarminPing.AAAAAGp4Yn0cpxWm.FIT.gz"
+                        ),
+                        "dateUploaded": "2026-08-09T11:20:29Z",
+                        "fileSize": 48123,
+                        "fileType": "FIT",
+                        "contentType": "application/gzip",
+                        "source": "GarminPing",
+                        "deviceName": "Edge 1040",
+                        "manufacturer": "Garmin",
+                        "product": "Edge 1040 Solar",
+                        "processingStatus": "processed",
+                    },
+                ],
+                "attachmentFileInfos": [],
+            },
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(
+                side_effect=[workout_response, details_response]
+            )
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_get_workout("1001")
+
+        assert result["device_files"] == [
+            {
+                "file_id": "-542574935",
+                "file_system_id": 7,
+                "file_name": (
+                    "tp-3693769.2026-08-09-11-20-29-590Z."
+                    "GarminPing.AAAAAGp4Yn0cpxWm.FIT.gz"
+                ),
+                "uploaded_at": "2026-08-09T11:20:29Z",
+                "size_bytes": 48123,
+                "file_type": "FIT",
+                "content_type": "application/gzip",
+                "source": "GarminPing",
+                "device_name": "Edge 1040",
+                "manufacturer": "Garmin",
+                "product": "Edge 1040 Solar",
+                "processing_status": "processed",
+            }
+        ]
+        serialized = json.dumps(result)
+        for private_value in (
+            "nested-private",
+            "private@example.com",
+            "/tmp/private",
+            r"C:\Users\private",
+            "signed.example",
+            "opaque-secret",
+            "session-secret",
+        ):
+            assert private_value not in serialized
 
     @pytest.mark.asyncio
     async def test_get_workout_not_found(self):

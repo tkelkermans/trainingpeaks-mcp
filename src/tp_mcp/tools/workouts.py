@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import date as date_type
 from datetime import datetime as datetime_type
 from typing import Any, Literal, NamedTuple
@@ -24,6 +25,21 @@ from tp_mcp.tools.structure import (
 
 logger = logging.getLogger("tp-mcp")
 
+_NUMERIC_FILE_ID = re.compile(r"^-?[0-9]{1,20}$")
+_SAFE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ ()-]{0,254}$")
+_SAFE_FILE_LABEL = re.compile(r"^[\w .()+_-]{1,100}$")
+_SAFE_FILE_TYPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$")
+_SAFE_CONTENT_TYPE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/"
+    r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$"
+)
+_SENSITIVE_FILE_VALUE = re.compile(
+    r"(?:https?://|[A-Za-z]:[\\/]|(?:^|\s)/\S+|"
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
+    r"\b(?:authorization|bearer|cookie|password|secret|token)\b)",
+    re.IGNORECASE,
+)
+
 
 class StructurePayload(NamedTuple):
     wire_structure: dict | None
@@ -31,6 +47,16 @@ class StructurePayload(NamedTuple):
     intensity_factor: float | None
     tss: float | None
     error: str | None
+
+
+def _validated_file_string(value: Any, validator: re.Pattern[str]) -> str | None:
+    if (
+        isinstance(value, str)
+        and validator.fullmatch(value)
+        and not _SENSITIVE_FILE_VALUE.search(value)
+    ):
+        return value
+    return None
 
 
 def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
@@ -42,28 +68,64 @@ def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
     for item in infos:
         if not isinstance(item, dict):
             continue
+        file_info: dict[str, Any] = {}
+
         file_id = item.get("fileId")
-        file_info = {
-            "file_id": str(file_id) if file_id is not None else None,
-            "file_system_id": item.get("fileSystemId"),
-            "file_name": item.get("fileName"),
-            "uploaded_at": item.get("dateUploaded"),
+        if isinstance(file_id, int) and not isinstance(file_id, bool):
+            file_id = str(file_id)
+        if isinstance(file_id, str) and _NUMERIC_FILE_ID.fullmatch(file_id):
+            file_info["file_id"] = file_id
+
+        file_system_id = item.get("fileSystemId")
+        if isinstance(file_system_id, int) and not isinstance(file_system_id, bool):
+            file_info["file_system_id"] = file_system_id
+
+        file_name = item.get("fileName")
+        safe_file_name = _validated_file_string(file_name, _SAFE_FILE_NAME)
+        if safe_file_name is not None:
+            file_info["file_name"] = safe_file_name
+
+        uploaded_at = item.get("dateUploaded")
+        if (
+            isinstance(uploaded_at, str)
+            and len(uploaded_at) <= 64
+            and not _SENSITIVE_FILE_VALUE.search(uploaded_at)
+        ):
+            try:
+                datetime_type.fromisoformat(
+                    uploaded_at[:-1] + "+00:00"
+                    if uploaded_at.endswith("Z")
+                    else uploaded_at
+                )
+            except ValueError:
+                pass
+            else:
+                file_info["uploaded_at"] = uploaded_at
+
+        file_size = item.get("fileSize")
+        if (
+            isinstance(file_size, int)
+            and not isinstance(file_size, bool)
+            and file_size >= 0
+        ):
+            file_info["size_bytes"] = file_size
+
+        string_fields = {
+            "file_type": ("fileType", _SAFE_FILE_TYPE),
+            "content_type": ("contentType", _SAFE_CONTENT_TYPE),
+            "source": ("source", _SAFE_FILE_LABEL),
+            "device_name": ("deviceName", _SAFE_FILE_LABEL),
+            "manufacturer": ("manufacturer", _SAFE_FILE_LABEL),
+            "product": ("product", _SAFE_FILE_LABEL),
+            "processing_status": ("processingStatus", _SAFE_FILE_LABEL),
         }
-        safe_optional_fields = {
-            "size_bytes": "fileSize",
-            "file_type": "fileType",
-            "content_type": "contentType",
-            "source": "source",
-            "device_name": "deviceName",
-            "manufacturer": "manufacturer",
-            "product": "product",
-            "processing_status": "processingStatus",
-        }
-        for output_name, source_name in safe_optional_fields.items():
-            value = item.get(source_name)
+        for output_name, (source_name, validator) in string_fields.items():
+            value = _validated_file_string(item.get(source_name), validator)
             if value is not None:
                 file_info[output_name] = value
-        normalized.append(file_info)
+
+        if file_info:
+            normalized.append(file_info)
     return normalized
 
 
