@@ -43,12 +43,27 @@ def _extract_file_infos(raw_data: dict, key: str) -> list[dict]:
         if not isinstance(item, dict):
             continue
         file_id = item.get("fileId")
-        normalized.append({
+        file_info = {
             "file_id": str(file_id) if file_id is not None else None,
             "file_system_id": item.get("fileSystemId"),
             "file_name": item.get("fileName"),
             "uploaded_at": item.get("dateUploaded"),
-        })
+        }
+        safe_optional_fields = {
+            "size_bytes": "fileSize",
+            "file_type": "fileType",
+            "content_type": "contentType",
+            "source": "source",
+            "device_name": "deviceName",
+            "manufacturer": "manufacturer",
+            "product": "product",
+            "processing_status": "processingStatus",
+        }
+        for output_name, source_name in safe_optional_fields.items():
+            value = item.get(source_name)
+            if value is not None:
+                file_info[output_name] = value
+        normalized.append(file_info)
     return normalized
 
 
@@ -329,6 +344,7 @@ async def tp_get_workout(workout_id: str) -> dict[str, Any]:
             return {
                 "id": str(workout.id),
                 "date": workout.date.isoformat(),
+                "start_time": raw_data.get("startTime"),
                 "title": workout.title,
                 "sport": workout.sport,
                 "workout_type": workout.workout_type,

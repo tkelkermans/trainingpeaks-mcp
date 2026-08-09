@@ -242,6 +242,75 @@ class TestTpGetWorkout:
         assert result["has_private_workout_note"] is True
 
     @pytest.mark.asyncio
+    async def test_get_workout_exposes_source_start_and_allowlisted_file_metadata(
+        self,
+        mock_api_responses,
+    ):
+        """A missing start/file field would hide the safe provider evidence classifier uses."""
+        workout_data = dict(mock_api_responses["workout_detail"])
+        workout_data["startTime"] = "2026-08-09T10:31:35Z"
+        workout_response = APIResponse(success=True, data=workout_data)
+        details_response = APIResponse(
+            success=True,
+            data={
+                "workoutDeviceFileInfos": [
+                    {
+                        "fileId": -542574935,
+                        "fileSystemId": 7,
+                        "fileName": "tp-3693769.2026-08-09.GarminPing.FIT.gz",
+                        "dateUploaded": "2026-08-09T11:20:29Z",
+                        "fileSize": 48123,
+                        "fileType": "FIT",
+                        "contentType": "application/gzip",
+                        "source": "GarminPing",
+                        "deviceName": "Edge 1040",
+                        "manufacturer": "Garmin",
+                        "processingStatus": "processed",
+                        "downloadUrl": "https://signed.example/private-token",
+                        "serverPath": "/tmp/private.fit.gz",
+                        "email": "private@example.com",
+                        "deviceSerialNumber": "SERIAL-SECRET",
+                        "authorization": "Bearer opaque-secret",
+                    }
+                ],
+                "attachmentFileInfos": [],
+            },
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(
+                side_effect=[workout_response, details_response]
+            )
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_get_workout("1001")
+
+        assert result["start_time"] == "2026-08-09T10:31:35Z"
+        assert result["device_files"] == [
+            {
+                "file_id": "-542574935",
+                "file_system_id": 7,
+                "file_name": "tp-3693769.2026-08-09.GarminPing.FIT.gz",
+                "uploaded_at": "2026-08-09T11:20:29Z",
+                "size_bytes": 48123,
+                "file_type": "FIT",
+                "content_type": "application/gzip",
+                "source": "GarminPing",
+                "device_name": "Edge 1040",
+                "manufacturer": "Garmin",
+                "processing_status": "processed",
+            }
+        ]
+        serialized = json.dumps(result)
+        assert "private-token" not in serialized
+        assert "/tmp/private.fit.gz" not in serialized
+        assert "private@example.com" not in serialized
+        assert "SERIAL-SECRET" not in serialized
+        assert "opaque-secret" not in serialized
+
+    @pytest.mark.asyncio
     async def test_get_workout_not_found(self):
         """Test workout not found."""
         workout_response = APIResponse(
@@ -369,7 +438,7 @@ class TestTpCreateWorkout:
         assert payload["startTimePlanned"] == "2026-01-10T16:45:00"
 
     @pytest.mark.asyncio
-    async def test_create_workout_datetime_preserves_time(self):
+    async def test_create_workout_datetime_preserves_time(self):  # noqa: F811
         """Datetime input should schedule the workout with the provided time."""
         create_response = APIResponse(
             success=True,
