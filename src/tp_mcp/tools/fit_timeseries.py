@@ -41,6 +41,11 @@ def _is_fit_location_field(name: str) -> bool:
     return is_location_field(name) or lowered.endswith(("_lat", "_lon", "_long", "_lng"))
 
 
+def _is_developer_location_field(spec: Mapping[str, Any]) -> bool:
+    """Classify a developer field by both declared semantics and emitted name."""
+    return _is_fit_location_field(str(spec["name"])) or _is_fit_location_field(str(spec["identifier"]))
+
+
 def _rfc3339(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -239,7 +244,7 @@ def _normalized_message(
                     spec = _unknown_developer_spec(key, used_names)
                     unknown_specs[unknown_key] = spec
                     developer_specs.append(spec)
-            if _is_fit_location_field(str(spec["identifier"])) and not include_location:
+            if _is_developer_location_field(spec) and not include_location:
                 redacted_fields.add(str(spec["identifier"]))
                 continue
             serialized = _serialize_value(value)
@@ -375,7 +380,7 @@ def _normalize_fit_messages(
     visible_developer_specs = [
         spec
         for spec in developer_specs
-        if include_location or not _is_fit_location_field(str(spec["identifier"]))
+        if include_location or not _is_developer_location_field(spec)
     ]
     developer_units = {str(spec["identifier"]): spec["unit"] for spec in visible_developer_specs}
     record_units = {**_profile_units("record"), **developer_units}
@@ -391,10 +396,20 @@ def _normalize_fit_messages(
         {"identifier": field, "name": field, "unit": record_units.get(field)}
         for field in channel_names
     ]
+    private_developer_identifiers = {
+        str(spec["identifier"])
+        for spec in developer_specs
+        if _is_developer_location_field(spec)
+    }
     safe_channels = (
         channels
         if include_location or channels is None
-        else [channel for channel in channels if not _is_fit_location_field(channel)]
+        else [
+            channel
+            for channel in channels
+            if not _is_fit_location_field(channel)
+            and channel not in private_developer_identifiers
+        ]
     )
     page = build_timeseries_page(
         workout_id=workout_id,
@@ -497,12 +512,42 @@ def _decode_fit_bytes(payload: bytes) -> tuple[dict[str, Any], list[str]]:
     return normalized_messages, [str(error) for error in errors]
 
 
+def _is_structurally_fit_payload(payload: bytes) -> bool:
+    """Check the FIT header before trusting decoder message/warning output."""
+    stream = Stream.from_byte_array(bytearray(payload))
+    try:
+        return bool(Decoder(stream).is_fit())
+    finally:
+        stream.close()
+
+
 def _tagged_failure(*, error_code: str, reason: str, message: str) -> dict[str, Any]:
     return tag_unavailable(
         {"isError": True, "error_code": error_code, "message": message},
         reason=reason,
         source=SOURCE,
     )
+
+
+def _remote_safe_fetch_failure(fetch_result: Mapping[str, Any], *, file_id: str) -> dict[str, Any]:
+    """Replace upstream error detail with stable hosted-safe messages."""
+    error_code = str(fetch_result.get("error_code", "API_ERROR"))
+    if error_code == "VALIDATION_ERROR":
+        reason = "validation_error"
+        message = "Invalid workout_id or file_id."
+    elif error_code == "NOT_FOUND":
+        reason = "file_not_found"
+        message = f"Workout file {file_id} not found."
+    elif error_code == "PAYLOAD_TOO_LARGE":
+        reason = "compressed_size_limit_exceeded"
+        message = "Workout file exceeds the compressed FIT size limit."
+    elif error_code in {"AUTH_EXPIRED", "AUTH_INVALID"}:
+        reason = "workout_file_fetch_error"
+        message = "Workout file authentication failed. Re-authenticate."
+    else:
+        reason = "workout_file_fetch_error"
+        message = "Workout file could not be fetched."
+    return _tagged_failure(error_code=error_code, reason=reason, message=message)
 
 
 async def tp_get_workout_file_timeseries(
@@ -528,19 +573,22 @@ async def tp_get_workout_file_timeseries(
             message="Invalid pagination or channel parameters.",
         )
 
-    payload, fetch_result = await _fetch_workout_file_bytes(workout_id, file_id)
+    payload, fetch_result = await _fetch_workout_file_bytes(
+        workout_id,
+        file_id,
+        max_bytes=MAX_COMPRESSED_FIT_BYTES,
+    )
     if payload is None:
-        error_code = str(fetch_result.get("error_code", "API_ERROR"))
-        if error_code == "VALIDATION_ERROR":
-            reason = "validation_error"
-        elif error_code == "NOT_FOUND":
-            reason = "file_not_found"
-        else:
-            reason = "workout_file_fetch_error"
-        return tag_unavailable(fetch_result, reason=reason, source=SOURCE)
+        return _remote_safe_fetch_failure(fetch_result, file_id=file_id)
 
     try:
         fit_payload, compression = _prepare_fit_payload(payload)
+        if not _is_structurally_fit_payload(fit_payload):
+            raise _FitPayloadError(
+                error_code="FIT_DECODE_ERROR",
+                reason="fit_decode_error",
+                message="Workout file could not be decoded as FIT.",
+            )
         messages, warnings = _decode_fit_bytes(fit_payload)
     except _FitPayloadError as error:
         return _tagged_failure(

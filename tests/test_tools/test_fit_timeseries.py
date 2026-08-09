@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tp_mcp.client.http import RawResponse
+from tp_mcp.client.http import ErrorCode, RawResponse
 
 WORKOUT_ID = 3875883540
 FILE_ID = -542574935
@@ -153,6 +153,11 @@ def _encoded_native_fit() -> bytes:
     return encoder.close()
 
 
+def _encoded_empty_fit() -> bytes:
+    sdk = pytest.importorskip("garmin_fit_sdk")
+    return sdk.Encoder().close()
+
+
 async def _call_tool(payload: bytes, **kwargs: Any) -> dict[str, Any]:
     module = _fit_module()
     tool = getattr(module, "tp_get_workout_file_timeseries", None)
@@ -279,6 +284,42 @@ def test_redacts_coordinate_like_fields_everywhere_unless_explicitly_requested()
     assert public["samples"][0]["custom_lat"] == 46.0
 
 
+def test_redacts_developer_coordinate_using_declared_semantics_after_name_collision():
+    timestamp = datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc)
+    messages = {
+        "record_mesgs": [
+            {
+                "timestamp": timestamp,
+                "position_lat": 550_000_000,
+                "developer_fields": {6: 46.0},
+            }
+        ],
+        "field_description_mesgs": [
+            {
+                "developer_data_index": 0,
+                "field_definition_number": 6,
+                "field_name": "position_lat",
+                "units": "degrees",
+            }
+        ],
+    }
+
+    private = _normalize(messages)
+    private_requested = _normalize(messages, channels=["position_lat__developer_0_6"])
+    public = _normalize(messages, include_location=True)
+
+    renamed = "position_lat__developer_0_6"
+    assert renamed not in private["samples"][0]
+    assert renamed not in private["units"]
+    assert renamed not in {channel["identifier"] for channel in private["channels"]}
+    assert renamed not in {field["identifier"] for field in private["developer_fields"]}
+    assert renamed not in {channel["identifier"] for channel in private_requested["channels"]}
+    assert renamed not in private_requested["units"]
+    assert renamed in private["privacy"]["redacted_fields"]
+    assert public["samples"][0][renamed] == 46.0
+    assert public["units"][renamed] == "degrees"
+
+
 def test_treats_naive_fit_datetimes_as_utc_rfc3339():
     messages = _decoded_messages(count=1)
     messages["record_mesgs"][0]["timestamp"] = datetime(2026, 8, 9, 10, 0)
@@ -343,6 +384,36 @@ async def test_rejects_malformed_fit_with_stable_tagged_failure():
     assert result["availability"] == {
         "state": "unavailable",
         "reason": "fit_decode_error",
+        "source": SOURCE,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rejects_structurally_invalid_payload_even_if_decoder_reports_no_warnings():
+    _fit_module()
+    with patch(
+        "tp_mcp.tools.fit_timeseries._decode_fit_bytes",
+        return_value=({}, []),
+    ) as decode:
+        result = await _call_tool(b"")
+
+    assert result["isError"] is True
+    assert result["error_code"] == "FIT_DECODE_ERROR"
+    assert result["availability"]["reason"] == "fit_decode_error"
+    decode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accepts_structurally_valid_fit_with_no_activity_messages():
+    result = await _call_tool(_encoded_empty_fit())
+
+    assert "isError" not in result
+    assert result["samples"] == []
+    assert result["laps"] == []
+    assert result["sessions"] == []
+    assert result["availability"] == {
+        "state": "available",
+        "reason": "source_returned_no_samples",
         "source": SOURCE,
     }
 
@@ -416,6 +487,29 @@ async def test_preserves_missing_file_error_and_adds_stable_availability_tag():
 
 
 @pytest.mark.asyncio
+async def test_sanitizes_arbitrary_upstream_fetch_error_details():
+    module = _fit_module()
+    tool = getattr(module, "tp_get_workout_file_timeseries", None)
+    assert tool is not None
+    upstream_error = {
+        "isError": True,
+        "error_code": "API_ERROR",
+        "message": "GET https://signed.invalid/raw?email=rider@example.com failed at /private/tp/file.fit",
+    }
+    with patch(
+        "tp_mcp.tools.fit_timeseries._fetch_workout_file_bytes",
+        new=AsyncMock(return_value=(None, upstream_error)),
+    ):
+        result = await tool(str(WORKOUT_ID), str(FILE_ID))
+
+    assert result["error_code"] == "API_ERROR"
+    assert result["message"] == "Workout file could not be fetched."
+    assert "signed.invalid" not in repr(result)
+    assert "rider@example.com" not in repr(result)
+    assert "/private/tp/file.fit" not in repr(result)
+
+
+@pytest.mark.asyncio
 async def test_raw_file_helper_returns_bytes_without_writing_to_disk():
     workout_files = import_module("tp_mcp.tools.workout_files")
     fetch = getattr(workout_files, "_fetch_workout_file_bytes", None)
@@ -446,6 +540,37 @@ async def test_raw_file_helper_returns_bytes_without_writing_to_disk():
     }
     client.get_raw.assert_awaited_once_with(
         f"/fitness/v6/athletes/123456/workouts/{WORKOUT_ID}/rawfiledata/{FILE_ID}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_raw_file_helper_supports_bounded_streaming_fetch():
+    workout_files = import_module("tp_mcp.tools.workout_files")
+    fetch = getattr(workout_files, "_fetch_workout_file_bytes", None)
+    assert fetch is not None
+    client = AsyncMock()
+    client.ensure_athlete_id = AsyncMock(return_value=123456)
+    client.get_raw_bounded = AsyncMock(
+        return_value=RawResponse(
+            success=False,
+            error_code=ErrorCode.PAYLOAD_TOO_LARGE,
+            message="Raw response exceeds the configured size limit.",
+        )
+    )
+
+    with patch("tp_mcp.tools.workout_files.TPClient") as client_type:
+        client_type.return_value.__aenter__.return_value = client
+        payload, result = await fetch(
+            str(WORKOUT_ID),
+            str(FILE_ID),
+            max_bytes=16,
+        )
+
+    assert payload is None
+    assert result["error_code"] == "PAYLOAD_TOO_LARGE"
+    client.get_raw_bounded.assert_awaited_once_with(
+        f"/fitness/v6/athletes/123456/workouts/{WORKOUT_ID}/rawfiledata/{FILE_ID}",
+        max_bytes=16,
     )
 
 

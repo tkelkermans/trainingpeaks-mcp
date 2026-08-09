@@ -64,6 +64,8 @@ def _save_workout_file(workout_id: str, file_id: str, filename: str, data: bytes
 async def _fetch_workout_file_bytes(
     workout_id: str,
     file_id: str,
+    *,
+    max_bytes: int | None = None,
 ) -> tuple[bytes | None, dict[str, Any]]:
     """Fetch authenticated workout-file bytes without touching the filesystem."""
     if not _is_numeric_id(workout_id):
@@ -89,7 +91,10 @@ async def _fetch_workout_file_bytes(
             }
 
         endpoint = f"/fitness/v6/athletes/{athlete_id}/workouts/{workout_id}/rawfiledata/{file_id}"
-        response = await client.get_raw(endpoint)
+        if max_bytes is None:
+            response = await client.get_raw(endpoint)
+        else:
+            response = await client.get_raw_bounded(endpoint, max_bytes=max_bytes)
 
     if response.is_error:
         if response.error_code is not None and response.error_code.value == "NOT_FOUND":
