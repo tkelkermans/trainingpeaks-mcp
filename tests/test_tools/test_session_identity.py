@@ -322,6 +322,114 @@ async def test_planned_duration_falls_through_independently_of_structure_anchor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_duration",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "positive_infinity", "negative_infinity"],
+)
+async def test_nonfinite_planned_duration_falls_through_to_finite_source(
+    unsafe_duration: float,
+):
+    """A non-finite plan duration must not block the next finite source."""
+    details, analyses = _august_9_sources()
+    details[GARMIN_ID]["metrics"]["duration_planned"] = unsafe_duration
+    details[TPV_ID]["metrics"]["duration_planned"] = 0.75
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    assert result["clusters"][0]["canonical_fields"]["planned_duration"] == {
+        "value": 0.75,
+        "unit": "h",
+        "source_workout_id": TPV_ID,
+        "method": "planned_field_fallback",
+    }
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_planned_duration_is_omitted_when_every_source_is_nonfinite():
+    """No public plan duration is safer than emitting invalid JSON numerics."""
+    details, analyses = _august_9_sources()
+    nonfinite = [float("nan"), float("inf"), float("-inf")]
+    for detail, unsafe_duration in zip(details.values(), nonfinite, strict=True):
+        detail["metrics"]["duration_planned"] = unsafe_duration
+        detail["metrics"]["tss_planned"] = None
+        detail["structured_workout"] = None
+
+    result, _, _ = await _classify(
+        details,
+        analyses,
+        [GARMIN_ID, TPV_ID, APPLE_ID],
+    )
+
+    assert "planned_duration" not in result["clusters"][0]["canonical_fields"]
+    assert all("plan_anchor" not in member["roles"] for member in result["members"])
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_duration", "expected_conflict"),
+    [
+        (0.9833333333333333, False),
+        (0.9833330555555556, True),
+    ],
+    ids=["exact_60_seconds", "60_001_seconds"],
+)
+async def test_planned_duration_tolerance_ignores_only_float_drift(
+    second_duration: float,
+    expected_conflict: bool,
+):
+    """Binary noise at 60 seconds is equal, but 60.001 seconds is material."""
+    details, analyses = _august_9_sources()
+    first = details[TPV_ID]
+    second = deepcopy(first)
+    second["id"] = APPLE_ID
+    second["title"] = "TrainingPeaks Virtual - second ingest"
+    first["metrics"]["duration_planned"] = 1.0
+    second["metrics"]["duration_planned"] = second_duration
+    first["metrics"]["tss_planned"] = None
+    second["metrics"]["tss_planned"] = None
+    first["structured_workout"] = None
+    second["structured_workout"] = None
+    details = {TPV_ID: first, APPLE_ID: second}
+    analyses = {
+        TPV_ID: _analysis(TPV_ID, start="2026-08-09T10:29:10Z"),
+        APPLE_ID: _analysis(APPLE_ID, start="2026-08-09T10:29:26Z"),
+    }
+
+    result, _, _ = await _classify(details, analyses, [TPV_ID, APPLE_ID])
+
+    cluster = result["clusters"][0]
+    if expected_conflict:
+        assert "planned_duration" not in cluster["canonical_fields"]
+        assert {
+            "field": "planned_duration",
+            "reason": "material_tied_conflict",
+            "candidates": [
+                {"workout_id": TPV_ID, "value": 1.0},
+                {"workout_id": APPLE_ID, "value": second_duration},
+            ],
+        } in cluster["unresolved_fields"]
+    else:
+        assert cluster["canonical_fields"]["planned_duration"] == {
+            "value": 1.0,
+            "unit": "h",
+            "source_workout_id": TPV_ID,
+            "method": "plan_anchor",
+        }
+        assert not any(
+            field["field"] == "planned_duration"
+            for field in cluster["unresolved_fields"]
+        )
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.asyncio
 async def test_planned_structure_falls_through_independently_of_duration_anchor():
     """A duration anchor with unusable structure must not hide another safe structure."""
     details, analyses = _august_9_sources()
@@ -353,6 +461,7 @@ async def test_planned_structure_falls_through_independently_of_duration_anchor(
     [
         {"notes": "file:///tmp/private-plan.json"},
         [{"notes": "tokenABC123"}],
+        {"//server/share/private-key": "safe"},
     ],
 )
 async def test_empty_sanitized_plan_structure_falls_through(
@@ -561,6 +670,15 @@ async def test_public_members_and_laps_never_echo_unsafe_nested_metadata():
                 "session_code": "tokenABC123",
                 "control_text": "safe\u0000private",
                 "unstable_value": float("nan"),
+                "forward_unc": "//server/share/private-plan.fit",
+                "backslash_unc": r"\\server\share\private-plan.fit",
+                r"C:\Users\private\key": "safe",
+                r"\\server\share\private-key": "safe",
+                "//server/share/private-key": "safe",
+                "file:///tmp/private-key": "safe",
+                "private@example.com": "safe",
+                "control\u0000key": "safe",
+                "credentialABC123": "safe",
             }
         ],
         "downloadUrl": "https://signed.example/private-plan-token",
@@ -620,6 +738,9 @@ async def test_unresolved_plan_evidence_recursively_removes_sensitive_values():
                 "name": "First",
                 "coach_note": r"C:\Users\private\plan.fit",
                 "unstable_value": float("inf"),
+                "forward_unc": "//server/share/private-plan.fit",
+                r"C:\Users\private\key": "safe",
+                "private@example.com": "safe",
             }
         ],
         "resource": "file:///tmp/private-plan.fit",
@@ -630,6 +751,11 @@ async def test_unresolved_plan_evidence_recursively_removes_sensitive_values():
                 "name": "Second",
                 "session_code": "secretABC123",
                 "unstable_value": float("-inf"),
+                "backslash_unc": r"\\server\share\private-plan.fit",
+                r"\\server\share\private-key": "safe",
+                "file:///tmp/private-key": "safe",
+                "control\u0000key": "safe",
+                "tokenABC123": "safe",
             }
         ],
         "safe_label": "Second",
@@ -769,6 +895,7 @@ async def test_start_threshold_boundaries_are_explicit(
         "second_duration_hours",
         "evidence_field",
         "expected_delta_seconds",
+        "expected_relationship",
     ),
     [
         (
@@ -776,18 +903,28 @@ async def test_start_threshold_boundaries_are_explicit(
             1.0,
             "start_delta_seconds",
             300.001,
+            "unresolved",
+        ),
+        (
+            "2026-08-09T10:00:00Z",
+            1.1666666666666667,
+            "duration_delta_seconds",
+            600.0,
+            "same_session",
         ),
         (
             "2026-08-09T10:00:00Z",
             1.1666669444444444,
             "duration_delta_seconds",
             600.001,
+            "unresolved",
         ),
         (
             "2026-08-09T10:19:59.999Z",
             1.0,
             "start_delta_seconds",
             1199.999,
+            "unresolved",
         ),
     ],
 )
@@ -796,6 +933,7 @@ async def test_fractional_threshold_deltas_are_compared_exactly(
     second_duration_hours: float,
     evidence_field: str,
     expected_delta_seconds: float,
+    expected_relationship: str,
 ):
     """Rounding before comparison must not move a candidate across a threshold."""
     details, analyses = _august_9_sources()
@@ -811,7 +949,7 @@ async def test_fractional_threshold_deltas_are_compared_exactly(
     )
 
     pair = result["pairwise_evidence"][0]
-    assert pair["relationship"] == "unresolved"
+    assert pair["relationship"] == expected_relationship
     assert pair["evidence"][evidence_field] == pytest.approx(
         expected_delta_seconds,
         abs=1e-9,

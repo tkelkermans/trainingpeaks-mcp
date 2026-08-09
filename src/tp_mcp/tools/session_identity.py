@@ -27,6 +27,7 @@ SAME_START_MAX_SECONDS = 300
 DISTINCT_START_MIN_SECONDS = 1200
 DURATION_MATCH_MAX_SECONDS = 600
 DURATION_MATERIAL_CONFLICT_SECONDS = 1200
+_FLOAT_COMPARISON_ABS_TOLERANCE = 1e-12
 
 _POLICY = {
     "version": POLICY_VERSION,
@@ -333,7 +334,7 @@ def _safe_nested_value(value: Any) -> Any:
             if not isinstance(key, str):
                 continue
             normalized_key = _normalized_text(key)
-            if is_location_field(key) or any(
+            if len(key) > 500 or is_sensitive_text(key) or is_location_field(key) or any(
                 part in normalized_key for part in _SENSITIVE_KEY_PARTS
             ):
                 continue
@@ -501,6 +502,26 @@ def _duration_delta_seconds(first: float | None, second: float | None) -> float 
     return abs(first - second) * 3600
 
 
+def _at_most(value: float, boundary: float) -> bool:
+    """Apply inclusive policy boundaries without absorbing material deltas."""
+    return value < boundary or math.isclose(
+        value,
+        boundary,
+        rel_tol=0.0,
+        abs_tol=_FLOAT_COMPARISON_ABS_TOLERANCE,
+    )
+
+
+def _at_least(value: float, boundary: float) -> bool:
+    """Apply inclusive policy boundaries without absorbing material deltas."""
+    return value > boundary or math.isclose(
+        value,
+        boundary,
+        rel_tol=0.0,
+        abs_tol=_FLOAT_COMPARISON_ABS_TOLERANCE,
+    )
+
+
 def _pair_relationship(
     first: _Candidate,
     second: _Candidate,
@@ -527,17 +548,17 @@ def _pair_relationship(
         signals.append("sport_conflict")
     if start_delta is None:
         signals.append("start_time_unavailable_or_incomparable")
-    elif start_delta <= SAME_START_MAX_SECONDS:
+    elif _at_most(start_delta, SAME_START_MAX_SECONDS):
         signals.append("start_within_same_threshold")
-    elif start_delta >= DISTINCT_START_MIN_SECONDS:
+    elif _at_least(start_delta, DISTINCT_START_MIN_SECONDS):
         signals.append("start_beyond_distinct_threshold")
     else:
         signals.append("start_between_thresholds")
     if duration_delta is None:
         signals.append("actual_duration_unavailable")
-    elif duration_delta <= DURATION_MATCH_MAX_SECONDS:
+    elif _at_most(duration_delta, DURATION_MATCH_MAX_SECONDS):
         signals.append("duration_compatible")
-    elif duration_delta >= DURATION_MATERIAL_CONFLICT_SECONDS:
+    elif _at_least(duration_delta, DURATION_MATERIAL_CONFLICT_SECONDS):
         signals.append("material_duration_conflict")
     else:
         signals.append("duration_between_thresholds")
@@ -551,14 +572,15 @@ def _pair_relationship(
     if not sources_available:
         relationship: Relationship = "unresolved"
     elif sport_conflict or (
-        start_delta is not None and start_delta >= DISTINCT_START_MIN_SECONDS
+        start_delta is not None
+        and _at_least(start_delta, DISTINCT_START_MIN_SECONDS)
     ):
         relationship = "distinct"
     elif (
         start_delta is not None
-        and start_delta <= SAME_START_MAX_SECONDS
+        and _at_most(start_delta, SAME_START_MAX_SECONDS)
         and duration_delta is not None
-        and duration_delta <= DURATION_MATCH_MAX_SECONDS
+        and _at_most(duration_delta, DURATION_MATCH_MAX_SECONDS)
     ):
         relationship = "same_session"
     else:
@@ -627,11 +649,8 @@ def _field(
     return result
 
 
-def _metric_getter(name: str) -> Callable[[_Candidate], Any]:
-    def get_metric(candidate: _Candidate) -> Any:
-        return candidate.metrics.get(name)
-
-    return get_metric
+def _planned_duration(candidate: _Candidate) -> float | None:
+    return _as_float(candidate.metrics.get("duration_planned"))
 
 
 def _actual_metric_getter(name: str) -> Callable[[_Candidate], float | None]:
@@ -673,7 +692,7 @@ def _material_conflict(values: list[Any], tolerance: float) -> bool:
         return False
     if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
         numeric = [float(value) for value in values]
-        return max(numeric) - min(numeric) > tolerance
+        return not _at_most(max(numeric) - min(numeric), tolerance)
     return any(value != values[0] for value in values[1:])
 
 
@@ -770,7 +789,7 @@ def _execution_method(candidate: _Candidate, preference: Preference) -> str:
 def _plan_rank(candidate: _Candidate) -> tuple[int, int, int, int, int]:
     return (
         int(candidate.detail.get("structured_workout") is not None),
-        int(candidate.metrics.get("duration_planned") is not None),
+        int(_planned_duration(candidate) is not None),
         int(candidate.metrics.get("tss_planned") is not None),
         int(candidate.provider == "garmin"),
         _richness(candidate),
@@ -781,7 +800,7 @@ def _plan_anchor(candidates: list[_Candidate]) -> tuple[_Candidate | None, list[
     planned_candidates = [
         candidate
         for candidate in candidates
-        if candidate.metrics.get("duration_planned") is not None
+        if _planned_duration(candidate) is not None
         or candidate.metrics.get("tss_planned") is not None
         or candidate.detail.get("structured_workout") is not None
     ]
@@ -852,7 +871,7 @@ def _canonicalize(
             plan_getter = (
                 _planned_structure
                 if source_name == "structured_workout"
-                else _metric_getter(source_name)
+                else _planned_duration
             )
             selected = _choose(
                 planned_candidates,

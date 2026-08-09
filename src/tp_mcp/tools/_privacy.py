@@ -5,7 +5,8 @@ import re
 _URI = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{1,31}://", re.IGNORECASE)
 _EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 _ABSOLUTE_PATH = re.compile(
-    r"(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/]|(?:^|[\s=:;,()])/(?!/)\S+)",
+    r"(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/]|//[^/\s]+/|"
+    r"(?:^|[\s=:;,()])/(?!/)\S+)",
     re.IGNORECASE,
 )
 _CREDENTIAL_MARKER = re.compile(
