@@ -1,15 +1,13 @@
 """Tests for workout analysis tool."""
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from tp_mcp.client.http import APIResponse
-from tp_mcp.client.models import WorkoutAnalysis, parse_workout_analysis
-from tp_mcp.tools.analyze import ANALYSIS_DATA_DIR, tp_analyze_workout
+from tp_mcp.client.models import parse_workout_analysis
+from tp_mcp.tools.analyze import tp_analyze_workout
 
 TEST_ATHLETE_ID = 123456
 TEST_ACCESS_TOKEN = "gAAAA_test_access_token_12345"
@@ -185,13 +183,14 @@ class TestTpAnalyzeWorkout:
         assert len(result["dataChannels"]) == 2
         assert result["dataChannels"][0]["identifier"] == "Power"
         assert result["time_series_points"] == 3
-        assert "data_file" in result
-        assert result["data_file"].endswith(".json")
-
-        # Verify full data was saved to file
-        saved = json.loads(Path(result["data_file"]).read_text())
-        assert saved["data"] == analysis_data["data"]
-        assert saved["data"][0]["Power"] == 150
+        assert "data_file" not in result
+        assert result["time_series_access"] == {
+            "tool": "tp_get_workout_timeseries",
+            "workout_id": 3553733903,
+            "total_samples": 3,
+            "default_limit": 500,
+            "max_limit": 1000,
+        }
 
     @pytest.mark.asyncio
     async def test_401_expired_auth(self):
