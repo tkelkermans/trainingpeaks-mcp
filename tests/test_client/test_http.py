@@ -9,6 +9,19 @@ import pytest
 from tp_mcp.client.http import MIN_REQUEST_INTERVAL, APIResponse, TPClient
 
 
+class _CountingByteStream(httpx.AsyncByteStream):
+    """Yield controlled chunks and record how far the client consumed."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.yielded = 0
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+
+
 class TestThrottling:
     """Tests for request throttling."""
 
@@ -201,3 +214,60 @@ class TestHandleResponse:
 
         assert result.success is True
         assert result.data is None
+
+
+class TestBoundedRawResponse:
+    """Tests for authenticated raw responses with transport-level size bounds."""
+
+    @pytest.mark.asyncio
+    async def test_returns_streamed_content_within_limit(self):
+        stream = _CountingByteStream([b"abc", b"def"])
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Disposition": 'attachment; filename="activity.fit"',
+                },
+                stream=stream,
+            )
+
+        client = TPClient()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client._token_cache.access_token = "test-token"
+        client._token_cache.expires_at = time.time() + 3600
+
+        try:
+            result = await client.get_raw_bounded("/raw", max_bytes=6)
+        finally:
+            await client.close()
+
+        assert result.success is True
+        assert result.content == b"abcdef"
+        assert result.content_type == "application/octet-stream"
+        assert result.content_disposition == 'attachment; filename="activity.fit"'
+        assert stream.yielded == 2
+
+    @pytest.mark.asyncio
+    async def test_stops_streaming_as_soon_as_response_crosses_limit(self):
+        stream = _CountingByteStream([b"abc", b"def", b"ghi"])
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=stream)
+
+        client = TPClient()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client._token_cache.access_token = "test-token"
+        client._token_cache.expires_at = time.time() + 3600
+
+        try:
+            result = await client.get_raw_bounded("/raw", max_bytes=4)
+        finally:
+            await client.close()
+
+        assert result.success is False
+        assert result.error_code is not None
+        assert result.error_code.value == "PAYLOAD_TOO_LARGE"
+        assert result.content == b""
+        assert stream.yielded == 2

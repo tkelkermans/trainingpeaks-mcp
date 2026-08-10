@@ -28,11 +28,8 @@ gracefully to empty on a 404 (some entries — e.g. manually logged, no device
 file — legitimately lack per-second/lap data while still having totals).
 """
 
-import json
 import logging
-import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -40,28 +37,24 @@ from pydantic import ValidationError
 
 from tp_mcp.client import TPClient, parse_workout_analysis
 from tp_mcp.tools._validation import WorkoutIdInput, format_validation_error
+from tp_mcp.tools.analysis_contract import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    TimeSeriesPageInput,
+    build_timeseries_page,
+    is_location_field,
+    tag_unavailable,
+)
 
 logger = logging.getLogger("tp-mcp")
 
 ANALYSIS_API_BASE = "https://api.peakswaresb.com"
 ANALYSIS_TIMEOUT = 60.0
-ANALYSIS_DATA_DIR = Path(tempfile.gettempdir()) / "tp-mcp" / "analysis"
+ANALYSIS_SOURCE = "trainingpeaks_analysis"
 
 _SUMMARY_PATH = "/workout-analysis/v2/analyze/summary"
 _CHARTS_PATH = "/workout-analysis/v2/analyze/charts"
 _LAPS_PATH = "/workout-analysis/v2/analyze/laps"
-
-
-def _save_analysis_json(workout_id: int, data: dict[str, Any]) -> str:
-    """Save full analysis data (including time-series) to a JSON file.
-
-    Returns:
-        Absolute path to the saved file.
-    """
-    ANALYSIS_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    filepath = ANALYSIS_DATA_DIR / f"workout_{workout_id}.json"
-    filepath.write_text(json.dumps(data, indent=2))
-    return str(filepath)
 
 
 def _error_for_status(status_code: int, workout_id: str) -> dict[str, Any] | None:
@@ -146,22 +139,15 @@ def _stop_timestamp(start_iso: str | None, elapsed_seconds: Any) -> str | None:
     return (start_dt + timedelta(seconds=float(elapsed_seconds))).isoformat()
 
 
-async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
-    """Get detailed workout analysis including metrics, zones, and lap data.
-
-    Full time-series data is saved to a JSON file for further analysis.
-
-    Args:
-        workout_id: The workout ID (from tp_get_workouts).
-
-    Returns:
-        Dict with totals, data channels, lap data, and path to full data file.
-    """
+async def _fetch_workout_analysis(
+    workout_id: str,
+) -> tuple[int | None, dict[str, Any]]:
+    """Fetch and normalize workout analysis from the current v2 endpoints."""
     try:
         validated = WorkoutIdInput(workout_id=workout_id)
     except (ValidationError, ValueError) as e:
         msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
-        return {
+        return None, {
             "isError": True,
             "error_code": "VALIDATION_ERROR",
             "message": msg,
@@ -171,17 +157,15 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
     async with TPClient() as client:
         athlete_id = await client.ensure_athlete_id()
         if not athlete_id:
-            return {
+            return None, {
                 "isError": True,
                 "error_code": "AUTH_INVALID",
                 "message": "Could not get athlete ID. Re-authenticate.",
             }
 
-        # Ensure we have a valid token (athlete_id may have come from cache
-        # without triggering token exchange)
         token_result = await client._ensure_access_token()
         if not token_result.success:
-            return {
+            return None, {
                 "isError": True,
                 "error_code": "AUTH_INVALID",
                 "message": token_result.message or "Failed to obtain access token.",
@@ -189,7 +173,7 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
 
         access_token = client._token_cache.access_token
         if not access_token:
-            return {
+            return None, {
                 "isError": True,
                 "error_code": "AUTH_INVALID",
                 "message": "No access token available. Re-authenticate.",
@@ -208,7 +192,7 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=ANALYSIS_TIMEOUT) as http_client:
             summary, err = await _post_analysis(http_client, _SUMMARY_PATH, headers, wid)
             if err:
-                return err
+                return None, err
 
             charts, charts_err = await _post_analysis(http_client, _CHARTS_PATH, headers, wid)
             if charts_err:
@@ -216,7 +200,7 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
                     logger.info("workout %s: no chart/stream data available", wid)
                     charts = None
                 else:
-                    return charts_err
+                    return None, charts_err
 
             laps, laps_err = await _post_analysis(http_client, _LAPS_PATH, headers, wid)
             if laps_err:
@@ -224,7 +208,7 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
                     logger.info("workout %s: no lap data available", wid)
                     laps = None
                 else:
-                    return laps_err
+                    return None, laps_err
 
     summary_data = (summary or {}).get("data") or {}
     # Key totals by ``friendlyName`` (e.g. "NP", "Distance") rather than the v2
@@ -275,6 +259,22 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
         "lapColumns": lap_columns,
     }
 
+    return wid, raw_data
+
+
+async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
+    """Get detailed workout analysis including metrics, zones, and lap data.
+
+    Args:
+        workout_id: The workout ID (from tp_get_workouts).
+
+    Returns:
+        Dict with totals, data channels, lap data, and time-series access metadata.
+    """
+    wid, raw_data = await _fetch_workout_analysis(workout_id)
+    if wid is None:
+        return raw_data
+
     try:
         analysis = parse_workout_analysis(raw_data)
     except Exception:
@@ -285,11 +285,7 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
             "message": "Failed to parse workout analysis.",
         }
 
-    # Save full raw data (including time-series) to file
-    data_file = _save_analysis_json(wid, raw_data)
-
-    # Return summary inline, point to file for full data
-    totals_out = {t.name: {"value": t.value, "unit": t.unit} for t in analysis.totals}
+    totals = {t.name: {"value": t.value, "unit": t.unit} for t in analysis.totals}
 
     channels = [
         {
@@ -306,16 +302,99 @@ async def tp_analyze_workout(workout_id: str) -> dict[str, Any]:
             if v is not None
         }
         for ch in analysis.data_elements
+        if not is_location_field(ch.identifier or "")
+        and not is_location_field(ch.name or "")
     ]
 
     return {
         "workoutId": analysis.workout_id,
         "startTimestamp": analysis.start_timestamp,
         "stopTimestamp": analysis.stop_timestamp,
-        "totals": totals_out,
+        "totals": totals,
         "dataChannels": channels,
         "lapData": analysis.lap_data,
         "lapColumns": analysis.lap_columns,
         "time_series_points": len(analysis.data),
-        "data_file": data_file,
+        "time_series_access": {
+            "tool": "tp_get_workout_timeseries",
+            "workout_id": analysis.workout_id,
+            "total_samples": len(analysis.data),
+            "default_limit": DEFAULT_PAGE_LIMIT,
+            "max_limit": MAX_PAGE_LIMIT,
+        },
     }
+
+
+async def tp_get_workout_timeseries(
+    workout_id: str,
+    offset: int = 0,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    channels: list[str] | None = None,
+    include_location: bool = False,
+) -> dict[str, Any]:
+    """Return an in-memory, paginated workout analysis time series."""
+    try:
+        page_input = TimeSeriesPageInput(
+            offset=offset,
+            limit=limit,
+            channels=channels,
+            include_location=include_location,
+        )
+    except (ValidationError, ValueError) as e:
+        msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
+        return tag_unavailable(
+            {
+                "isError": True,
+                "error_code": "VALIDATION_ERROR",
+                "message": msg,
+            },
+            reason="validation_error",
+            source=ANALYSIS_SOURCE,
+        )
+
+    wid, raw_data = await _fetch_workout_analysis(workout_id)
+    if wid is None:
+        return tag_unavailable(
+            raw_data,
+            reason=(
+                "validation_error"
+                if raw_data.get("error_code") == "VALIDATION_ERROR"
+                else "analysis_fetch_error"
+            ),
+            source=ANALYSIS_SOURCE,
+        )
+
+    try:
+        analysis = parse_workout_analysis(raw_data)
+    except Exception:
+        logger.exception("Failed to parse workout analysis")
+        return tag_unavailable(
+            {
+                "isError": True,
+                "error_code": "API_ERROR",
+                "message": "Failed to parse workout analysis.",
+            },
+            reason="analysis_parse_error",
+            source=ANALYSIS_SOURCE,
+        )
+
+    channel_metadata = [
+        {
+            "identifier": channel.identifier,
+            "name": channel.name,
+            "unit": channel.unit,
+        }
+        for channel in analysis.data_elements
+    ]
+    return build_timeseries_page(
+        workout_id=analysis.workout_id,
+        samples=analysis.data,
+        channel_metadata=channel_metadata,
+        start_timestamp=analysis.start_timestamp,
+        stop_timestamp=analysis.stop_timestamp,
+        offset=page_input.offset,
+        limit=page_input.limit,
+        requested_channels=page_input.channels,
+        include_location=page_input.include_location,
+        source=ANALYSIS_SOURCE,
+    )

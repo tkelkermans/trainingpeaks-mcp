@@ -24,7 +24,7 @@ Ask your AI assistant things like:
 - "Set my FTP to 310 and update my power zones"
 - "Add a calendar note for next Monday: rest day, travel"
 
-## Tools (65)
+## Tools (68)
 
 ### Workouts
 | Tool | Description |
@@ -49,17 +49,37 @@ Ask your AI assistant things like:
 |------|-------------|
 | `tp_upload_workout_file` | Upload a workout file (.fit/.tcx/.gpx) to an existing workout |
 | `tp_download_workout_file` | Download a workout file by file_id |
+| `tp_get_workout_file_timeseries` | Decode a size-limited FIT file in memory with paging, channel filtering, and location opt-in |
 | `tp_delete_workout_file` | Delete a workout file by file_id |
 
 ### Analysis & Performance
 | Tool | Description |
 |------|-------------|
-| `tp_analyze_workout` | Detailed analysis with time-series data, zones, and laps |
+| `tp_analyze_workout` | Detailed metrics, zones, laps, point count, and in-memory time-series access metadata |
+| `tp_get_workout_timeseries` | Paginated in-memory analysis samples with channel filtering and location opt-in |
+| `tp_classify_sessions` | Classify 2-20 workout records and select canonical fields without double-counting TSS |
 | `tp_get_peaks` | Power PRs (5s-90min) and running PRs (400m-marathon) |
 | `tp_get_workout_prs` | PRs set during a specific session |
 | `tp_get_fitness` | CTL, ATL, and TSB trend (fitness, fatigue, form) |
 | `tp_get_weekly_summary` | Combined workouts + fitness for a week with totals |
 | `tp_get_atp` | Annual Training Plan - weekly TSS targets, periods, races |
+
+The two time-series tools work in both local and hosted modes without returning
+server filesystem paths. Pages default to 500 samples and allow 1-1000 samples;
+`offset` is zero-based. A channel filter accepts at most 100 unique names, each
+up to 128 characters. Location channels are excluded by default and require
+`include_location=true`. FIT decoding is limited to 16 MiB compressed and
+64 MiB decompressed data.
+
+Each new analysis response includes an availability state of `available`,
+`partial`, or `unavailable`, with a source and reason. An empty sample list only
+means that the source has no records when its state is `available`; otherwise,
+inspect the availability reason. `tp_classify_sessions` accepts 2-20 unique
+workout IDs and an `auto`, `trainingpeaks_virtual`, or `garmin` preference. It
+combines metrics only for resolved same-session clusters, reports distinct or
+unresolved candidates separately, and selects one canonical TSS source rather
+than summing duplicate records. Duplicate exclusion is logical only: the tool
+does not pair, delete, or edit workouts.
 
 ### Athlete Settings
 | Tool | Description |
@@ -524,7 +544,7 @@ Binding to `localhost` works without a secret configured; binding to any non-loc
 
 ### Known limitations
 
-- File tools (`tp_download_workout_file`, `tp_analyze_workout` artifacts) write to the function's ephemeral tmp directory, so the paths they return are meaningless to a remote client - prefer base64 upload where the client supports it.
+- Hosted analysis should use `tp_get_workout_timeseries` or `tp_get_workout_file_timeseries`, which return bounded pages in memory and never return a server path, raw file bytes, or a signed URL. The legacy `tp_download_workout_file` remains available for local filesystem workflows.
 - Vercel enforces a 4.5 MB request/response body cap.
 - When the cookie expires, tool calls fail with `AUTH_EXPIRED` - just run `tp-mcp push-cookie` again.
 - Vercel's deployment protection blocks MCP clients with an SSO page (a 302 redirect). This affects both preview deployments **and** team-scoped production aliases - "use the production deployment" isn't enough on its own if you hit a protected alias. Pick and test your public alias with `vercel inspect`/`vercel ls` (see [Deploy](#deploy) and [Verify your deployment](#verify-your-deployment)), or disable deployment protection for the project.

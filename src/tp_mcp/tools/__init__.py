@@ -1,6 +1,6 @@
 """MCP tools for TrainingPeaks."""
 
-from tp_mcp.tools.analyze import tp_analyze_workout
+from tp_mcp.tools.analyze import tp_analyze_workout, tp_get_workout_timeseries
 from tp_mcp.tools.atp import tp_get_atp
 from tp_mcp.tools.auth_status import tp_auth_status
 from tp_mcp.tools.equipment import (
@@ -27,6 +27,7 @@ from tp_mcp.tools.events import (
     tp_update_event,
     tp_update_note,
 )
+from tp_mcp.tools.fit_timeseries import tp_get_workout_file_timeseries
 from tp_mcp.tools.fitness import tp_get_fitness
 from tp_mcp.tools.groups import (
     tp_add_athletes_to_group,
@@ -51,6 +52,7 @@ from tp_mcp.tools.metrics import tp_get_metrics, tp_get_nutrition, tp_log_metric
 from tp_mcp.tools.peaks import tp_get_peaks, tp_get_workout_prs
 from tp_mcp.tools.profile import tp_get_profile, tp_list_athletes
 from tp_mcp.tools.refresh_auth import tp_refresh_auth
+from tp_mcp.tools.session_identity import tp_classify_sessions
 from tp_mcp.tools.settings import (
     tp_create_zones,
     tp_get_athlete_settings,
@@ -98,6 +100,7 @@ __all__ = [
     "tp_add_workout_comment",
     "tp_analyze_workout",
     "tp_auth_status",
+    "tp_classify_sessions",
     "tp_copy_workout",
     "tp_create_availability",
     "tp_create_equipment",
@@ -136,8 +139,10 @@ __all__ = [
     "tp_get_weekly_summary",
     "tp_get_workout",
     "tp_get_workout_comments",
+    "tp_get_workout_file_timeseries",
     "tp_get_workout_note",
     "tp_get_workout_prs",
+    "tp_get_workout_timeseries",
     "tp_get_workout_types",
     "tp_get_zone_methods",
     "tp_list_athletes",

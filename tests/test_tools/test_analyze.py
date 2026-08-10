@@ -1,15 +1,13 @@
 """Tests for workout analysis tool (v2 endpoints: summary/charts/laps)."""
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from tp_mcp.client.http import APIResponse
-from tp_mcp.client.models import WorkoutAnalysis, parse_workout_analysis
-from tp_mcp.tools.analyze import ANALYSIS_DATA_DIR, tp_analyze_workout
+from tp_mcp.client.models import parse_workout_analysis
+from tp_mcp.tools.analyze import tp_analyze_workout
 
 TEST_ATHLETE_ID = 123456
 TEST_ACCESS_TOKEN = "gAAAA_test_access_token_12345"
@@ -84,6 +82,64 @@ def _sample_laps_response():
         ],
         "lapDetectionState": {"powerIntervalsDetected": False},
         "lapSources": {"Device": 1},
+    }
+
+
+def _sample_analysis_response():
+    """Minimal normalized analysis payload for tests at the in-memory seam."""
+    return {
+        "workoutId": 3553733903,
+        "startTimestamp": "2025-01-08T12:00:00",
+        "stopTimestamp": "2025-01-08T13:00:00",
+        "totals": [
+            {"name": "TSS", "value": "75.2"},
+            {"name": "NP", "value": "220", "unit": "W"},
+            {"name": "Distance", "value": "40.5", "unit": "km"},
+        ],
+        "dataElements": [
+            {
+                "identifier": "Power",
+                "name": "Power",
+                "unit": "watts",
+                "min": 0,
+                "max": 800,
+                "average": 200,
+                "zones": [
+                    {"label": "1", "min": 0, "max": 150},
+                    {"label": "2", "min": 151, "max": 200},
+                ],
+            },
+            {
+                "identifier": "HeartRate",
+                "name": "Heart Rate",
+                "unit": "bpm",
+                "min": 80,
+                "max": 185,
+                "average": 145,
+            },
+        ],
+        "data": [
+            {"time": 0, "Power": 150, "HeartRate": 120},
+            {"time": 4, "Power": 200, "HeartRate": 135},
+            {"time": 8, "Power": 220, "HeartRate": 145},
+        ],
+        "lapData": [
+            {
+                "id": "1",
+                "Name": "Lap 1",
+                "TotalElapsedTime": "00:20:00",
+                "AveragePower": "210",
+                "AverageHeartRate": "142",
+            },
+        ],
+        "lapColumns": [
+            {"identifier": "Name", "friendlyName": "Name", "type": "string"},
+            {
+                "identifier": "AveragePower",
+                "friendlyName": "Avg power (W)",
+                "type": "number",
+            },
+        ],
     }
 
 
@@ -242,22 +298,59 @@ class TestTpAnalyzeWorkout:
         assert result["time_series_points"] == 3
         assert len(result["lapData"]) == 1
         assert result["lapData"][0]["Name"] == "Lap 1"
-        assert "data_file" in result
-        assert result["data_file"].endswith(".json")
+        assert "data_file" not in result
+        assert result["time_series_access"] == {
+            "tool": "tp_get_workout_timeseries",
+            "workout_id": 3553733903,
+            "total_samples": 3,
+            "default_limit": 500,
+            "max_limit": 1000,
+        }
 
-        # Verify full merged data was saved to file
-        saved = json.loads(Path(result["data_file"]).read_text())
-        assert saved["data"][0]["Power"] == 150
-        assert saved["lapData"][0]["Name"] == "Lap 1"
-
-        # All three v2 endpoints were called, in order, with {"workoutId": ...}
+        # All three v2 endpoints are called in order with the minimal body.
         calls = mock_http_client.post.call_args_list
         assert len(calls) == 3
         assert calls[0].args[0].endswith("/workout-analysis/v2/analyze/summary")
         assert calls[1].args[0].endswith("/workout-analysis/v2/analyze/charts")
         assert calls[2].args[0].endswith("/workout-analysis/v2/analyze/laps")
-        for c in calls:
-            assert c.kwargs["json"] == {"workoutId": 3553733903}
+        for call in calls:
+            assert call.kwargs["json"] == {"workoutId": 3553733903}
+
+    @pytest.mark.asyncio
+    async def test_omits_all_location_channel_summaries(self):
+        analysis_data = _sample_analysis_response()
+        coordinate_names = [
+            "gps_lat",
+            "gps_lon",
+            "start_position_lat",
+            "end_position_long",
+            "position_lat",
+            "position_long",
+            "latitude",
+            "longitude",
+        ]
+        analysis_data["dataElements"].extend(
+            {
+                "identifier": name,
+                "name": name,
+                "unit": "degrees",
+                "min": 7.0,
+                "max": 46.0,
+                "average": 20.0,
+            }
+            for name in coordinate_names
+        )
+
+        with patch(
+            "tp_mcp.tools.analyze._fetch_workout_analysis",
+            new=AsyncMock(return_value=(3553733903, analysis_data)),
+        ):
+            result = await tp_analyze_workout("3553733903")
+
+        returned_identifiers = {
+            channel["identifier"] for channel in result["dataChannels"]
+        }
+        assert returned_identifiers == {"Power", "HeartRate"}
 
     @pytest.mark.asyncio
     async def test_charts_and_laps_404_degrade_gracefully(self):

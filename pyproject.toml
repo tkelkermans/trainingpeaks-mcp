@@ -33,6 +33,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "starlette>=0.36.0",
     "uvicorn>=0.30.0",
+    "garmin-fit-sdk==21.212.0",
 ]
 
 [project.urls]

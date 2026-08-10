@@ -52,6 +52,7 @@ class ErrorCode(Enum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     API_ERROR = "API_ERROR"
     NETWORK_ERROR = "NETWORK_ERROR"
+    PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
 
 
 @dataclass
@@ -540,6 +541,121 @@ class TPClient:
             content=response.content,
             content_type=response.headers.get("Content-Type"),
             content_disposition=response.headers.get("Content-Disposition"),
+        )
+
+    async def get_raw_bounded(
+        self,
+        endpoint: str,
+        *,
+        max_bytes: int,
+        params: dict[str, Any] | None = None,
+    ) -> RawResponse:
+        """Stream an authenticated raw response and stop when its byte limit is crossed."""
+        if max_bytes < 0:
+            return RawResponse(
+                success=False,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                message="max_bytes must be non-negative.",
+            )
+
+        await self._ensure_client()
+        assert self._client is not None
+
+        token_result = await self._ensure_access_token()
+        if not token_result.success:
+            return RawResponse(
+                success=False,
+                error_code=token_result.error_code,
+                message=token_result.message,
+            )
+
+        url = f"{self.base_url}{endpoint}"
+        for attempt in range(2):
+            await self._throttle()
+            headers = {**self._get_headers(), "Accept": "*/*"}
+            retry_unauthorized = False
+            try:
+                async with self._client.stream(
+                    "GET",
+                    url=url,
+                    headers=headers,
+                    params=params,
+                ) as response:
+                    if response.status_code == 401 and attempt == 0:
+                        retry_unauthorized = True
+                    elif response.status_code == 401:
+                        return RawResponse(
+                            success=False,
+                            error_code=ErrorCode.AUTH_EXPIRED,
+                            message="Session expired or invalid. Re-authenticate.",
+                        )
+                    elif response.status_code == 404:
+                        return RawResponse(
+                            success=False,
+                            error_code=ErrorCode.NOT_FOUND,
+                            message="Resource not found.",
+                        )
+                    elif response.status_code != 200:
+                        return RawResponse(
+                            success=False,
+                            error_code=ErrorCode.API_ERROR,
+                            message=f"Raw response failed with HTTP {response.status_code}.",
+                        )
+                    else:
+                        content_length = response.headers.get("Content-Length")
+                        if content_length is not None:
+                            try:
+                                if int(content_length) > max_bytes:
+                                    return RawResponse(
+                                        success=False,
+                                        error_code=ErrorCode.PAYLOAD_TOO_LARGE,
+                                        message="Raw response exceeds the configured size limit.",
+                                    )
+                            except ValueError:
+                                pass
+
+                        content = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            if len(content) + len(chunk) > max_bytes:
+                                return RawResponse(
+                                    success=False,
+                                    error_code=ErrorCode.PAYLOAD_TOO_LARGE,
+                                    message="Raw response exceeds the configured size limit.",
+                                )
+                            content.extend(chunk)
+                        return RawResponse(
+                            success=True,
+                            content=bytes(content),
+                            content_type=response.headers.get("Content-Type"),
+                            content_disposition=response.headers.get("Content-Disposition"),
+                        )
+            except httpx.TimeoutException:
+                return RawResponse(
+                    success=False,
+                    error_code=ErrorCode.NETWORK_ERROR,
+                    message="Raw response timed out.",
+                )
+            except httpx.RequestError:
+                return RawResponse(
+                    success=False,
+                    error_code=ErrorCode.NETWORK_ERROR,
+                    message="Network error while fetching raw response.",
+                )
+
+            if retry_unauthorized:
+                self._token_cache.clear()
+                token_result = await self._ensure_access_token()
+                if not token_result.success:
+                    return RawResponse(
+                        success=False,
+                        error_code=token_result.error_code,
+                        message=token_result.message,
+                    )
+
+        return RawResponse(
+            success=False,
+            error_code=ErrorCode.AUTH_EXPIRED,
+            message="Session expired or invalid. Re-authenticate.",
         )
 
     @property
