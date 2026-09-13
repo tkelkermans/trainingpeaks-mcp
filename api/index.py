@@ -5,6 +5,11 @@ The sys.path shim is needed because Vercel's Python runtime doesn't natively
 support the src/ layout — we insert src/ to resolve imports to tp_mcp package.
 
 The app fails closed if MCP_AUTH_SECRET is unset — security by default.
+
+Hobby Fluid Compute bills allocated memory × instance lifetime while requests
+are in flight (including I/O wait). vercel.json caps this function at 90s
+(Hobby default is 300s) to stay under the Fluid GB-hrs quota. Memory cannot
+be lowered on Hobby (~2 GB).
 """
 
 import sys
