@@ -49,6 +49,12 @@ from tp_mcp.tools.library import (
 )
 from tp_mcp.tools.metrics import tp_get_metrics, tp_get_nutrition, tp_log_metrics
 from tp_mcp.tools.peaks import tp_get_peaks, tp_get_workout_prs
+from tp_mcp.tools.plans import (
+    tp_apply_training_plan,
+    tp_get_training_plan,
+    tp_get_training_plan_workouts,
+    tp_list_training_plans,
+)
 from tp_mcp.tools.profile import tp_get_profile, tp_list_athletes
 from tp_mcp.tools.refresh_auth import tp_refresh_auth
 from tp_mcp.tools.settings import (
@@ -67,6 +73,7 @@ from tp_mcp.tools.strength import (
     tp_get_strength_workout,
     tp_get_strength_workouts,
     tp_search_exercises,
+    tp_update_strength_workout,
 )
 from tp_mcp.tools.structure import tp_validate_structure
 from tp_mcp.tools.weekly_summary import tp_get_weekly_summary
@@ -116,6 +123,10 @@ __all__ = [
     "tp_download_workout_file",
     "tp_get_athlete_settings",
     "tp_get_atp",
+    "tp_list_training_plans",
+    "tp_get_training_plan",
+    "tp_get_training_plan_workouts",
+    "tp_apply_training_plan",
     "tp_get_availability",
     "tp_get_equipment",
     "tp_get_events",
@@ -174,4 +185,5 @@ __all__ = [
     "tp_get_strength_workout",
     "tp_get_strength_workouts",
     "tp_delete_strength_workout",
+    "tp_update_strength_workout",
 ]
