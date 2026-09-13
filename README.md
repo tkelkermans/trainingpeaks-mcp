@@ -24,7 +24,7 @@ Ask your AI assistant things like:
 - "Set my FTP to 310 and update my power zones"
 - "Add a calendar note for next Monday: rest day, travel"
 
-## Tools (65)
+## Tools (84)
 
 ### Workouts
 | Tool | Description |
@@ -116,7 +116,37 @@ Ask your AI assistant things like:
 | `tp_delete_library` | Delete a library folder |
 | `tp_create_library_item` | Save a workout template |
 | `tp_update_library_item` | Edit a template |
-| `tp_schedule_library_workout` | Schedule a template to a calendar date |
+| `tp_schedule_library_workout` | Schedule a template to a calendar date, for one athlete or (coach accounts) several at once via `athletes` |
+
+### Strength Workouts
+| Tool | Description |
+|------|-------------|
+| `tp_search_exercises` | Search the built-in strength exercise library by name (offline) |
+| `tp_create_strength_workout` | Create a structured strength/gym workout (blocks of exercises with sets and parameters) |
+| `tp_get_strength_summary` | Get a strength workout's compliance summary (blocks/prescriptions/sets completed) |
+| `tp_get_strength_workouts` | List strength/gym workouts in a date range (they don't appear in `tp_get_workouts`) |
+| `tp_get_strength_workout` | Get a strength workout's full detail: blocks, exercises, sets, prescribed vs executed weights |
+| `tp_update_strength_workout` | Update a strength workout in place (replace/append blocks, retitle, mark complete) - preserves Garmin TSS and FIT files, so use this rather than delete-and-recreate on device-synced workouts |
+| `tp_delete_strength_workout` | Delete a strength workout by ID |
+
+### Athlete Groups (coach accounts)
+| Tool | Description |
+|------|-------------|
+| `tp_list_groups` | List the coach's athlete groups (TP tags) |
+| `tp_list_athletes_in_group` | List the athletes in one group, with names resolved from the roster |
+| `tp_create_group` | Create a new athlete group |
+| `tp_rename_group` | Rename an athlete group (default group cannot be renamed) |
+| `tp_delete_group` | Delete a group - the grouping only, athletes are not deleted |
+| `tp_add_athletes_to_group` | Add one or more athletes to a group |
+| `tp_remove_athletes_from_group` | Remove one or more athletes from a group |
+
+### Training Plans (multi-week)
+| Tool | Description |
+|------|-------------|
+| `tp_list_training_plans` | List the coach's authored multi-week training plans |
+| `tp_get_training_plan` | Summary of one plan: weeks, per-week duration/distance, sport breakdown |
+| `tp_get_training_plan_workouts` | All workouts of a plan laid out by week/day |
+| `tp_apply_training_plan` | Apply a plan to an athlete's calendar from a start date (safe synthetic copy) |
 
 ### Reference & Auth
 | Tool | Description |
@@ -128,6 +158,25 @@ Ask your AI assistant things like:
 | `tp_list_athletes` | List athletes available to this account (coach accounts) |
 
 ---
+
+## MCP Apps (inline charts)
+
+On clients that support the MCP Apps extension (spec 2026-07-28), some tools render an
+interactive UI inline in the conversation as well as returning their normal text payload.
+On every other client the tools behave exactly as before - the text answer is always
+complete on its own.
+
+![PMC fitness chart rendered inline](docs/images/pmc-chart-app.png)
+
+| Tool | App |
+|------|-----|
+| `tp_get_fitness` | Interactive CTL/ATL/TSB performance-management chart |
+| `tp_get_weekly_summary` | Week card: per-day load bars, planned vs completed, totals |
+| `tp_get_workout` | Interval-profile viewer for structured workouts (summary fallback otherwise) |
+
+*(Note: as of July 2026, Claude clients still connect to local stdio servers over the
+pre-2026 protocol, so the apps ship ready but won't render until client support rolls
+out. The tools' text output is unaffected either way.)*
 
 ## Setup Options
 
@@ -425,6 +474,19 @@ pytest tests/ -v
 mypy src/
 ruff check src/
 ```
+
+### Adding a tool
+
+Every tool automatically gets a display title and behaviour annotations
+(`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`),
+derived from its name by the metadata block at the bottom of
+`src/tp_mcp/server.py`. Name your tool by the conventions
+(`tp_get_*`/`tp_list_*` for reads, `tp_delete_*` for destructive removals,
+`tp_create_*`/`tp_add_*` for creates) and it needs nothing extra; if it
+doesn't fit the conventions, add it to the exception sets next to that block
+(`_DESTRUCTIVE_TOOLS`, `_NON_IDEMPOTENT_WRITES`, `_READ_ONLY_EXTRA`,
+`_TITLE_OVERRIDES`). `tests/test_tool_metadata.py` fails with instructions if
+a tool is misclassified, and the README tool tables above should gain a row.
 
 ## Licence
 

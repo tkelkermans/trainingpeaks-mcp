@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fitness (PMC)</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1d21; --muted: #6b7280; --grid: #e5e7eb;
+    --ctl: #2563eb; --atl: #dc2626; --tsb-pos: #16a34a33; --tsb-neg: #dc262633;
+    --tile: #f3f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --fg: #e5e7eb; --muted: #9ca3af; --grid: #2a2f36;
+      --ctl: #60a5fa; --atl: #f87171; --tsb-pos: #4ade8033; --tsb-neg: #f8717133;
+      --tile: #1c2127;
+    }
+  }
+  /* Host-driven theme (MCP Apps hostContext) overrides the media query */
+  :root[data-theme="dark"] {
+      --bg: #111418; --fg: #e5e7eb; --muted: #9ca3af; --grid: #2a2f36;
+      --ctl: #60a5fa; --atl: #f87171; --tsb-pos: #4ade8033; --tsb-neg: #f8717133;
+      --tile: #1c2127;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --fg: #1a1d21; --muted: #6b7280; --grid: #e5e7eb;
+    --ctl: #2563eb; --atl: #dc2626; --tsb-pos: #16a34a33; --tsb-neg: #dc262633;
+    --tile: #f3f4f6;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+               font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+  .wrap { padding: 12px 14px; }
+  .tiles { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .tile { background: var(--tile); border-radius: 8px; padding: 6px 12px; min-width: 72px; }
+  .tile .v { font-size: 18px; font-weight: 650; }
+  .tile .l { color: var(--muted); font-size: 11px; }
+  .legend { display: flex; gap: 14px; color: var(--muted); font-size: 11px; margin: 6px 2px; }
+  .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  #chartbox { position: relative; }
+  svg { width: 100%; height: 240px; display: block; }
+  #tip { position: absolute; pointer-events: none; background: var(--tile); color: var(--fg);
+         border: 1px solid var(--grid); border-radius: 6px; padding: 5px 8px; font-size: 11px;
+         display: none; white-space: pre; z-index: 2; }
+  #empty { color: var(--muted); padding: 28px 4px; }
+  #range { color: var(--muted); font-size: 11px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tiles" id="tiles" hidden>
+    <div class="tile"><div class="v" id="v-ctl">-</div><div class="l">CTL (fitness)</div></div>
+    <div class="tile"><div class="v" id="v-atl">-</div><div class="l">ATL (fatigue)</div></div>
+    <div class="tile"><div class="v" id="v-tsb">-</div><div class="l">TSB (form)</div></div>
+    <div class="tile"><div class="v" id="v-status">-</div><div class="l">status</div></div>
+  </div>
+  <div class="legend" id="legend" hidden>
+    <span><i style="background:var(--ctl)"></i>CTL</span>
+    <span><i style="background:var(--atl)"></i>ATL</span>
+    <span><i style="background:var(--grid)"></i>TSB (shaded, right axis)</span>
+  </div>
+  <div id="chartbox">
+    <svg id="chart" viewBox="0 0 720 240" preserveAspectRatio="none" hidden></svg>
+    <div id="tip"></div>
+  </div>
+  <div id="empty">Waiting for fitness data&#8230;</div>
+  <div id="range"></div>
+</div>
+<script>
+"use strict";
+// All API-derived strings go through textContent - workout/fitness payload
+// fields are user-influenced text and must render inert.
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+
+function el(name, attrs) {
+  const n = document.createElementNS(NS, name);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+function fmt(x) { return (x == null || isNaN(x)) ? "-" : (Math.round(x * 10) / 10).toString(); }
+
+function extractPayload(data) {
+  // Host pushes the tool result; the payload is the JSON text of content[0].
+  try {
+    const text = data && data.result && data.result.content && data.result.content[0]
+      && data.result.content[0].text;
+    if (typeof text === "string") return JSON.parse(text);
+  } catch (e) { /* fall through */ }
+  // Some hosts may deliver structuredContent or the payload directly.
+  if (data && data.result && data.result.structuredContent) return data.result.structuredContent;
+  if (data && data.daily_data) return data;
+  return null;
+}
+
+function render(p) {
+  const days = Array.isArray(p.daily_data) ? p.daily_data.filter(d => d && d.date) : [];
+  const cur = p.current || {};
+  $("v-ctl").textContent = fmt(cur.ctl);
+  $("v-atl").textContent = fmt(cur.atl);
+  $("v-tsb").textContent = fmt(cur.tsb);
+  $("v-status").textContent = (typeof cur.fitness_status === "string" && cur.fitness_status) ? cur.fitness_status : "-";
+  $("tiles").hidden = false;
+  $("range").textContent = (p.start_date && p.end_date) ? (p.start_date + " to " + p.end_date) : "";
+
+  if (days.length === 0) {
+    $("empty").textContent = "No daily fitness data in this range.";
+    return;
+  }
+  $("empty").hidden = true;
+  $("legend").hidden = false;
+  const svg = $("chart");
+  svg.hidden = false;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const W = 720, H = 240, padL = 34, padR = 34, padT = 10, padB = 22;
+  const iw = W - padL - padR, ih = H - padT - padB;
+
+  // Left scale: CTL/ATL only. TSB gets its own right-hand scale so its
+  // negative dips don't compress the load lines (TrainingPeaks convention).
+  let hiL = 1;
+  for (const d of days) for (const k of ["ctl", "atl"]) {
+    const v = d[k]; if (typeof v === "number") hiL = Math.max(hiL, v);
+  }
+  hiL *= 1.08;
+  let loR = 0, hiR = 1;
+  for (const d of days) {
+    const v = d.tsb; if (typeof v === "number") { loR = Math.min(loR, v); hiR = Math.max(hiR, v); }
+  }
+  loR = Math.min(loR * 1.1, -1);
+  hiR = Math.max(hiR * 1.1, 1);
+  const x = (i) => days.length === 1 ? padL + iw / 2 : padL + (i / (days.length - 1)) * iw;
+  const yL = (v) => padT + (1 - v / hiL) * ih;
+  // TSB lives in a bottom band (~1/3 height) so its swings never drown the lines
+  const bandTop = padT + ih * 0.66, bandH = ih * 0.34;
+  const yR = (v) => bandTop + (1 - (v - loR) / (hiR - loR)) * bandH;
+
+  // gridlines + left labels (CTL/ATL scale)
+  for (let g = 0; g <= 4; g++) {
+    const v = (g / 4) * hiL, gy = yL(v);
+    svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: gy, y2: gy,
+      stroke: "var(--grid)", "stroke-width": 1 }));
+    const t = el("text", { x: 4, y: gy + 4, fill: "var(--muted)", "font-size": 10 });
+    t.textContent = fmt(v);
+    svg.appendChild(t);
+  }
+  // right labels (TSB scale): min / 0 / max
+  for (const v of [loR, 0, hiR]) {
+    const t = el("text", { x: W - padR + 5, y: yR(v) + 4, fill: "var(--muted)", "font-size": 10 });
+    t.textContent = fmt(v);
+    svg.appendChild(t);
+  }
+  // TSB zero line (right scale)
+  svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: yR(0), y2: yR(0),
+    stroke: "var(--muted)", "stroke-width": 1, "stroke-dasharray": "3,3" }));
+  // TSB shaded area about its zero line
+  if (days.length > 1) {
+    let dPos = "M" + x(0) + "," + yR(0);
+    for (let i = 0; i < days.length; i++) {
+      dPos += " L" + x(i) + "," + yR(typeof days[i].tsb === "number" ? days[i].tsb : 0);
+    }
+    dPos += " L" + x(days.length - 1) + "," + yR(0) + " Z";
+    svg.appendChild(el("path", { d: dPos, fill: "var(--tsb-pos)", stroke: "none" }));
+  }
+  // CTL / ATL lines on the left scale (single point -> dot)
+  for (const [key, colour] of [["ctl", "var(--ctl)"], ["atl", "var(--atl)"]]) {
+    const pts = days.map((d, i) => [x(i), yL(typeof d[key] === "number" ? d[key] : 0)]);
+    if (pts.length === 1) {
+      svg.appendChild(el("circle", { cx: pts[0][0], cy: pts[0][1], r: 3, fill: colour }));
+    } else {
+      svg.appendChild(el("path", {
+        d: "M" + pts.map(p2 => p2[0] + "," + p2[1]).join(" L"),
+        fill: "none", stroke: colour, "stroke-width": 2 }));
+    }
+  }
+  // x labels: first anchored start, middle centred, last anchored end (no clipping)
+  const idxs = days.length > 2 ? [0, Math.floor(days.length / 2), days.length - 1] : [0, days.length - 1];
+  for (const i of new Set(idxs)) {
+    const anchor = i === 0 ? "start" : (i === days.length - 1 ? "end" : "middle");
+    const t = el("text", { x: x(i), y: H - 6, fill: "var(--muted)", "font-size": 10, "text-anchor": anchor });
+    t.textContent = String(days[i].date).slice(5); // MM-DD
+    svg.appendChild(t);
+  }
+  // hover tooltip
+  const tip = $("tip"), box = $("chartbox");
+  svg.addEventListener("mousemove", (ev) => {
+    const r = svg.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width * W;
+    let i = Math.round((fx - padL) / (iw || 1) * (days.length - 1));
+    i = Math.max(0, Math.min(days.length - 1, isNaN(i) ? 0 : i));
+    const d = days[i];
+    tip.textContent = String(d.date) + "\nCTL " + fmt(d.ctl) + "  ATL " + fmt(d.atl)
+      + "\nTSB " + fmt(d.tsb) + "  TSS " + fmt(d.tss);
+    tip.style.display = "block";
+    const bx = box.getBoundingClientRect();
+    tip.style.left = Math.min(ev.clientX - bx.left + 12, bx.width - 130) + "px";
+    tip.style.top = (ev.clientY - bx.top + 10) + "px";
+  });
+  svg.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+}
+
+const APP_NAME = "Fitness chart (PMC)";
+// ---- MCP Apps view protocol (inline implementation of the ext-apps wire
+// protocol - JSON-RPC 2.0 over postMessage; CSP forbids loading the SDK) ----
+let _rpcId = 0;
+const _pending = {};
+function _request(method, params) {
+  return new Promise((resolve) => {
+    const id = ++_rpcId;
+    _pending[id] = resolve;
+    window.parent.postMessage({ jsonrpc: "2.0", id: id, method: method, params: params }, "*");
+  });
+}
+function _notify(method, params) {
+  window.parent.postMessage({ jsonrpc: "2.0", method: method, params: params }, "*");
+}
+function _applyHostContext(ctx) {
+  if (ctx && (ctx.theme === "dark" || ctx.theme === "light")) {
+    document.documentElement.setAttribute("data-theme", ctx.theme);
+  }
+}
+function _reportSize() {
+  _notify("ui/notifications/size-changed", {
+    width: document.documentElement.scrollWidth,
+    height: document.documentElement.scrollHeight,
+  });
+}
+function _handleToolResult(result) { // params: standard CallToolResult
+  const payload = extractPayload({ result: result });
+  if (payload) { render(payload); requestAnimationFrame(_reportSize); }
+}
+window.addEventListener("message", (event) => {
+  const d = event.data;
+  if (!d || d.jsonrpc !== "2.0") {
+    const payload = extractPayload(d); // legacy raw-postMessage hosts
+    if (payload) { render(payload); requestAnimationFrame(_reportSize); }
+    return;
+  }
+  if (d.id != null && d.method == null) { // response to one of our requests
+    const resolve = _pending[d.id];
+    if (resolve) { delete _pending[d.id]; resolve(d.result); }
+    return;
+  }
+  if (d.method === "ui/notifications/tool-result") { _handleToolResult(d.params || {}); return; }
+  if (d.method === "ui/notifications/host-context-changed") { _applyHostContext(d.params || {}); return; }
+  if (d.method === "ui/resource-teardown" && d.id != null) {
+    window.parent.postMessage({ jsonrpc: "2.0", id: d.id, result: {} }, "*");
+  }
+});
+(async function _connect() {
+  const init = await _request("ui/initialize", {
+    protocolVersion: "2025-06-18",
+    appInfo: { name: APP_NAME, version: "1" },
+    appCapabilities: { availableDisplayModes: ["inline"] },
+  });
+  _applyHostContext(init && init.hostContext);
+  _notify("ui/notifications/initialized");
+})();
+if (window.ResizeObserver) {
+  new ResizeObserver(function () { _reportSize(); }).observe(document.body);
+}
+</script>
+</body>
+</html>
