@@ -2,6 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/index.py": {
+      "maxDuration": 90,
       "excludeFiles": "{tests/**,docs/**,.venv/**,**/__pycache__/**}"
     }
   }
